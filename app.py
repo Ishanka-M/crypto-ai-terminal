@@ -464,7 +464,50 @@ with tab8:
             if ok: st.success(msg)
             else:  st.error(msg)
 
-    with st.expander("🔌 API Status Check"):
+    with st.expander("🤖 Gemini API Debug", expanded=True):
+        st.markdown("**Secrets එකේ keys check කරනවා:**")
+
+        # Show what keys are loaded
+        try:
+            gem_secrets = st.secrets.get("gemini", {})
+            if gem_secrets:
+                loaded = []
+                for i in range(1, 8):
+                    k = gem_secrets.get(f"key_{i}", "")
+                    if k:
+                        masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "TOO SHORT"
+                        loaded.append(f"key_{i}: `{masked}`")
+                    else:
+                        loaded.append(f"key_{i}: ❌ missing")
+                for line in loaded:
+                    st.markdown(line)
+            else:
+                st.error("❌ [gemini] section secrets எகில் නෑ!")
+                st.code("""Streamlit Secrets → add:
+[gemini]
+key_1 = "AIzaSy..."
+key_2 = "AIzaSy..."
+""")
+        except Exception as e:
+            st.error(f"Secrets read error: {e}")
+
+        st.markdown("---")
+        test_key = st.text_input("Manual key test (paste key here):", type="password",
+                                  placeholder="AIzaSy...")
+        if st.button("🧪 Test This Key"):
+            if test_key:
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=test_key)
+                    model = genai.GenerativeModel("gemini-1.5-flash")
+                    r = model.generate_content("Say OK")
+                    st.success(f"✅ Key works! Response: {r.text[:50]}")
+                except Exception as e:
+                    st.error(f"❌ Key failed: {e}")
+            else:
+                st.warning("Key paste කරන්න")
+
+
         if st.button("Test All APIs Now"):
             with st.spinner("Testing all APIs..."):
                 statuses = get_api_status()
