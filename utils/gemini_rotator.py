@@ -1,24 +1,31 @@
 """
 Gemini API Key Rotation Manager
 Keys limit වෙද්දී automatically rotate වෙනවා
+Streamlit secrets එකෙන් keys load කරනවා
 """
 import google.generativeai as genai
 import streamlit as st
 import time
 
-GEMINI_API_KEYS = [
-    "YOUR_GEMINI_KEY_1",
-    "YOUR_GEMINI_KEY_2",
-    "YOUR_GEMINI_KEY_3",
-    "YOUR_GEMINI_KEY_4",
-    "YOUR_GEMINI_KEY_5",
-    "YOUR_GEMINI_KEY_6",
-    "YOUR_GEMINI_KEY_7",
-]
+def _load_keys() -> list:
+    """Streamlit secrets එකෙන් Gemini keys load කරනවා"""
+    keys = []
+    try:
+        gem = st.secrets.get("gemini", {})
+        for i in range(1, 8):
+            k = gem.get(f"key_{i}", "").strip()
+            if k and not k.startswith("YOUR_") and len(k) > 10:
+                keys.append(k)
+    except Exception:
+        pass
+    # Fallback: hardcode කරන්න ඕනේ නම් මෙතන දාන්න
+    # if not keys:
+    #     keys = ["AIzaSy..."]
+    return keys if keys else ["INVALID_KEY"]
 
 class GeminiRotator:
     def __init__(self):
-        self.keys = GEMINI_API_KEYS
+        self.keys = _load_keys()
         self.current_index = 0
         self.failed_keys = set()
 
