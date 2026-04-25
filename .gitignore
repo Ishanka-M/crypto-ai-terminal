@@ -1,0 +1,22 @@
+# Secrets - NEVER commit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# ML Models (large files)
+models/*.pkl
+
+# Data cache
+data/
+*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
