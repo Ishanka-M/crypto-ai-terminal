@@ -269,10 +269,11 @@ with tab3:
             if not df_ai.empty:
                 df_ai = run_all_indicators(df_ai)
                 structure = detect_structure(df_ai)
-                rsi_now = df_ai["rsi"].iloc[-1] if "rsi" in df_ai.columns else "N/A"
+                rsi_raw = df_ai["rsi"].iloc[-1] if "rsi" in df_ai.columns else None
+                rsi_now = f"{rsi_raw:.1f}" if rsi_raw is not None else "N/A"
                 px = df_ai["close"].iloc[-1]
                 prompt = f"""Analyze {primary_coin} {timeframe}:
-Price: ${px:,.4f}, RSI: {rsi_now:.1f if isinstance(rsi_now,float) else rsi_now}
+Price: ${px:,.4f}, RSI: {rsi_now}
 Structure: {structure['structure']}, High: ${structure['last_high']:,.4f}, Low: ${structure['last_low']:,.4f}
 Give: 1) Sentiment 2) Key levels 3) BUY/SELL/WAIT recommendation 4) Risk warning. Under 250 words."""
                 response = gemini.generate(prompt)
