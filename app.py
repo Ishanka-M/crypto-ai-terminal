@@ -499,7 +499,7 @@ key_2 = "AIzaSy..."
                 try:
                     import google.generativeai as genai
                     genai.configure(api_key=test_key)
-                    model = genai.GenerativeModel("gemini-1.5-flash")
+                    model = genai.GenerativeModel("gemini-3.1-flash")
                     r = model.generate_content("Say OK")
                     st.success(f"✅ Key works! Response: {r.text[:50]}")
                 except Exception as e:
