@@ -544,13 +544,17 @@ with tab_signals:
                 font=dict(color="#c9d1d9"),margin=dict(l=20,r=20,t=40,b=10))
             st.plotly_chart(fig_g, use_container_width=True)
 
-        # Log to Sheets
-        sid = st.session_state.spreadsheet_id
-        if sid and SHEETS_AVAILABLE:
-            if st.button("📋 Log signal to Google Sheets"):
-                ok = log_signal_to_sheet(sid, s)
-                if ok: st.success("Signal logged ✓")
-                else:  st.error("Failed to log signal")
+        # Auto-log signal to Sheets
+        _sid2 = st.session_state.get("spreadsheet_id","")
+        if _sid2 and SHEETS_AVAILABLE:
+            log_signal(s, sid=_sid2)
+            st.caption("✅ Signal auto-logged to Google Sheets")
+        if st.button("📋 Manually log this signal"):
+            if _sid2:
+                log_signal(s, sid=_sid2)
+                st.success("Signal logged ✓")
+            else:
+                st.warning("Connect Google Sheets in the 📋 Sheets tab first")
 
 
 # ══════════════════════════════════════════
@@ -731,254 +735,375 @@ with tab_backtest:
                     title="Equity Curve",yaxis=dict(gridcolor="#1e2d3d"),
                     xaxis=dict(gridcolor="#1e2d3d"))
                 st.plotly_chart(fig_eq, use_container_width=True)
+
+                # Auto-save backtest result to Sheets
+                _sid = st.session_state.get("spreadsheet_id","")
+                if _sid and SHEETS_AVAILABLE:
+                    log_backtest({
+                        "symbol": bt_sym, "timeframe": bt_tf,
+                        "initial_balance": bt_bal, "final_balance": round(balance,2),
+                        "pnl_pct": round(pnl/bt_bal*100,2), "win_rate": round(wr,1),
+                        "total_trades": len(trades), "profit_factor": round(pf,2),
+                        "max_drawdown_pct": round(max_dd,2), "sharpe_ratio": 0,
+                    }, _sid)
             else:
                 st.info("No trades triggered with current settings. Lower min confidence.")
     else:
         st.info("Configure settings and click **▶️ Run Backtest**")
 
 
+
 # ══════════════════════════════════════════
-# TAB 6 — GOOGLE SHEETS
+# TAB 6 — GOOGLE SHEETS (Full Data Manager)
 # ══════════════════════════════════════════
 
 with tab_sheets:
-    st.markdown("### 📋 Google Sheets Integration")
+    st.markdown("### 📋 Google Sheets — Persistent Data Manager")
 
+    # ── Connection status ─────────────────────
     sheets_status = get_sheets_status()
-    if not sheets_status["library_installed"]:
-        st.error("❌ `gspread` not installed. Add to requirements.txt: `gspread>=6.0.0`")
-    elif not sheets_status["authenticated"]:
-        st.warning("⚠️ Google Sheets not authenticated. Configure credentials in **⚙️ Settings**.")
-    else:
-        st.success("✅ Google Sheets connected")
+    s_auth  = sheets_status.get("authenticated", False)
+    s_sheet = sheets_status.get("spreadsheet_ok", False)
+    s_tabs  = sheets_status.get("tab_count", 0)
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    col_s1.metric("Library",       "✅ Installed" if SHEETS_AVAILABLE else "❌ Missing")
+    col_s2.metric("Auth",          "✅ Connected" if s_auth else "❌ No credentials")
+    col_s3.metric("Spreadsheet",   f"✅ {s_tabs} tabs" if s_sheet else "❌ Not linked")
 
     st.markdown("---")
 
-    # Spreadsheet ID input
-    sid = st.text_input(
-        "Google Spreadsheet ID",
-        value=st.session_state.spreadsheet_id,
-        placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
-        help="Copy from your Google Sheet URL: docs.google.com/spreadsheets/d/**[ID]**/edit"
-    )
-    if sid != st.session_state.spreadsheet_id:
-        st.session_state.spreadsheet_id = sid
-
-    if not SHEETS_AVAILABLE:
-        st.info("Install gspread to enable Google Sheets features.")
-    elif not sid:
-        st.info("Enter your Spreadsheet ID above to get started.")
-    else:
-        st.markdown("#### 📤 Export to Sheets")
-        c1,c2,c3 = st.columns(3)
-
-        with c1:
-            if st.button("💾 Save Settings"):
-                settings = {
-                    "risk_percent":   st.session_state.risk_pct,
-                    "timeframe":      st.session_state.timeframe,
-                    "coins":          ",".join(st.session_state.coins),
-                    "auto_trading":   st.session_state.auto_trading,
-                    "ai_signals":     st.session_state.ai_signals,
-                    "gemini_model":   st.session_state.gemini_model,
-                }
-                ok = save_settings_to_sheet(sid, settings)
-                st.success("Settings saved ✓") if ok else st.error("Failed")
-
-        with c2:
-            if st.button("🔑 Save API Keys"):
-                keys_data = {
-                    "binance_api_key":    st.session_state.binance_api_key,
-                    "binance_api_secret": st.session_state.binance_api_secret,
-                    "gemini_keys":        st.session_state.gemini_api_keys,
-                    "telegram_token":     st.session_state.telegram_token,
-                    "telegram_chat_id":   st.session_state.telegram_chat_id,
-                }
-                ok = save_api_keys_to_sheet(sid, keys_data)
-                st.success("API keys saved ✓") if ok else st.error("Failed")
-
-        with c3:
-            if st.button("📥 Load from Sheets"):
-                loaded = load_api_keys_from_sheet(sid)
-                if loaded:
-                    for k,v in loaded.items():
-                        if k in st.session_state: st.session_state[k] = v
-                    st.success(f"Loaded {len(loaded)} settings ✓")
-                else:
-                    st.warning("Nothing to load")
-
-        st.markdown("---")
-        st.markdown("#### 📊 Trade History from Sheets")
-        if st.button("📥 Load Trade History"):
-            df_hist = get_trade_history(sid)
-            if not df_hist.empty:
-                st.dataframe(df_hist, use_container_width=True, height=300)
-            else:
-                st.info("No trades logged yet.")
-
-    # Setup guide
-    with st.expander("📖 Google Sheets Setup Guide"):
+    # ── Step 1: GCP Credentials ───────────────
+    with st.expander("🔐 Step 1 — Google Cloud Credentials", expanded=not s_auth):
         st.markdown("""
-**Step 1 — Create Service Account:**
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create project → Enable **Google Sheets API** + **Google Drive API**
-3. Create **Service Account** → Download JSON key
-
-**Step 2 — Share your Sheet:**
-1. Open your Google Sheet
-2. Share with the service account email (ends with `@...gserviceaccount.com`)
-3. Give **Editor** permission
-
-**Step 3 — Add credentials:**
-- **Streamlit Cloud**: Add JSON content to Secrets as `gcp_service_account`
-- **Local**: Place `service_account.json` in project root
-
-**Step 4 — Get Spreadsheet ID:**
-From URL: `docs.google.com/spreadsheets/d/`**`[ID_HERE]`**`/edit`
+        1. [console.cloud.google.com](https://console.cloud.google.com) → New Project
+        2. Enable **Sheets API** + **Drive API**
+        3. Create **Service Account** → Download **JSON key**
+        4. Paste JSON content below
         """)
+        cred_input = st.text_area(
+            "Service Account JSON",
+            height=140,
+            placeholder='{"type":"service_account","project_id":"...","private_key":"-----BEGIN RSA PRIVATE KEY-----\\n..."}',
+            help="Paste the full content of your downloaded service_account.json"
+        )
+        if st.button("🔗 Connect Google Cloud", type="primary", key="connect_gcp"):
+            if cred_input.strip():
+                try:
+                    import json as _json
+                    st.session_state.gcp_credentials = _json.loads(cred_input)
+                    st.success("✅ Credentials saved — now enter Spreadsheet ID below")
+                    st.rerun()
+                except Exception:
+                    st.error("❌ Invalid JSON — paste the full service_account.json content")
+            else:
+                st.warning("Paste your JSON credentials above")
+
+    # ── Step 2: Spreadsheet ID ────────────────
+    with st.expander("📊 Step 2 — Link Google Spreadsheet", expanded=s_auth and not s_sheet):
+        st.markdown("""
+        1. Open [sheets.google.com](https://sheets.google.com) → Create new sheet
+        2. Share with your service account email (**Editor** permission)
+        3. Copy the Sheet ID from the URL and paste below
+        """)
+        sid_input = st.text_input(
+            "Spreadsheet ID",
+            value=st.session_state.get("spreadsheet_id",""),
+            placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+        )
+        if st.button("🔗 Link Spreadsheet + Create Tabs", type="primary", key="link_sheet"):
+            if sid_input.strip():
+                st.session_state.spreadsheet_id = sid_input.strip()
+                with st.spinner("Setting up spreadsheet tabs..."):
+                    ok = setup_all_tabs(sid_input.strip())
+                if ok:
+                    st.success(f"✅ Spreadsheet linked! All {len(ALL_TABS)} data tabs created.")
+                    st.rerun()
+                else:
+                    st.error("❌ Could not access spreadsheet — check ID and sharing settings")
+            else:
+                st.warning("Enter the Spreadsheet ID")
+
+    if not s_auth or not s_sheet:
+        st.info("Complete Steps 1 and 2 above to enable data persistence.")
+        st.stop()
+
+    sid = st.session_state.spreadsheet_id
+    st.success(f"✅ Connected to spreadsheet · {s_tabs} tabs active")
+
+    st.markdown("---")
+
+    # ── View Saved API Keys ───────────────────
+    st.markdown("#### 🔑 Saved API Keys")
+    df_keys = get_saved_keys_display(sid)
+    if df_keys.empty:
+        st.info("No API keys saved yet. Go to ⚙️ Settings to add them.")
+    else:
+        st.dataframe(df_keys, use_container_width=True, hide_index=True)
+        st.caption("🔒 Keys are locked. Only deletable via Reset (type RESET to confirm).")
+
+    # ── Load all data buttons ─────────────────
+    st.markdown("#### 📥 Load from Sheets")
+    lc1, lc2, lc3 = st.columns(3)
+    with lc1:
+        if st.button("🔑 Load API Keys", use_container_width=True):
+            result = load_api_keys(sid)
+            if result:
+                # Re-init Gemini if keys loaded
+                gkeys = result.get("gemini_api_keys", [])
+                if gkeys and GENAI_AVAILABLE:
+                    try:
+                        initialize_rotator_from_keys(gkeys, st.session_state.gemini_model)
+                    except Exception:
+                        pass
+                st.success(f"✅ Loaded {len(result)} values from Sheets")
+                st.rerun()
+            else:
+                st.warning("No keys found in Sheets")
+    with lc2:
+        if st.button("⚙️ Load Settings", use_container_width=True):
+            result = load_settings(sid)
+            if result:
+                st.success(f"✅ Loaded {len(result)} settings")
+                st.rerun()
+            else:
+                st.warning("No settings found")
+    with lc3:
+        if st.button("🔄 Refresh All", use_container_width=True):
+            load_api_keys(sid)
+            load_settings(sid)
+            st.success("✅ All data refreshed from Sheets")
+            st.rerun()
+
+    st.markdown("---")
+
+    # ── View data tabs ────────────────────────
+    st.markdown("#### 📊 View Sheet Data")
+    view_tab = st.selectbox("Select data to view", [
+        "Signals Log", "Trade History", "Backtest Results", "Equity Curve"
+    ])
+
+    if view_tab == "Signals Log":
+        df = get_signals_log(sid, 50)
+        if not df.empty:
+            st.dataframe(df, use_container_width=True, height=300)
+        else:
+            st.info("No signals logged yet.")
+
+    elif view_tab == "Trade History":
+        df = get_trades(sid)
+        if not df.empty:
+            c1,c2,c3 = st.columns(3)
+            if "pnl" in df.columns:
+                total_pnl = pd.to_numeric(df["pnl"], errors="coerce").sum()
+                wins = (pd.to_numeric(df["pnl"], errors="coerce") > 0).sum()
+                c1.metric("Total Trades", len(df))
+                c2.metric("Total PnL", f"${total_pnl:+.2f}")
+                c3.metric("Win Rate", f"{wins/len(df)*100:.1f}%" if len(df)>0 else "N/A")
+            st.dataframe(df, use_container_width=True, height=300)
+        else:
+            st.info("No trades logged yet.")
+
+    elif view_tab == "Backtest Results":
+        df = get_backtests(sid)
+        if not df.empty:
+            st.dataframe(df, use_container_width=True, height=300)
+        else:
+            st.info("No backtests logged yet.")
+
+    elif view_tab == "Equity Curve":
+        df = get_equity_curve(sid)
+        if not df.empty and "balance" in df.columns:
+            import plotly.graph_objects as _go
+            fig_eq2 = _go.Figure()
+            fig_eq2.add_trace(_go.Scatter(
+                x=df["timestamp"], y=pd.to_numeric(df["balance"], errors="coerce"),
+                mode="lines+markers", line=dict(color="#00ff88", width=2),
+                fill="tozeroy", fillcolor="rgba(0,255,136,0.06)"
+            ))
+            fig_eq2.update_layout(height=280, paper_bgcolor="#060910",
+                plot_bgcolor="#0c1117", font=dict(color="#c9d1d9"),
+                margin=dict(l=8,r=8,t=30,b=8), title="Balance Over Time",
+                yaxis=dict(gridcolor="#1e2d3d"), xaxis=dict(gridcolor="#1e2d3d"))
+            st.plotly_chart(fig_eq2, use_container_width=True)
+        else:
+            st.info("No equity data logged yet.")
+
+    st.markdown("---")
+
+    # ── DANGER ZONE — Reset ───────────────────
+    with st.expander("🔴 Danger Zone — Reset API Keys"):
+        st.error("⚠️ This permanently deletes ALL saved API keys from Google Sheets!")
+        reset_input = st.text_input("Type **RESET** to confirm deletion", key="reset_confirm")
+        if st.button("🗑 DELETE ALL KEYS", type="primary", key="do_reset"):
+            ok = reset_api_keys(sid, confirm_text=reset_input)
+            if ok:
+                st.success("✅ All keys deleted. Session cleared.")
+                st.rerun()
+            else:
+                st.error("Type exactly RESET to confirm")
 
 
 # ══════════════════════════════════════════
-# TAB 7 — SETTINGS
+# TAB 7 — SETTINGS (Full Persistent)
 # ══════════════════════════════════════════
 
 with tab_settings:
     st.markdown("### ⚙️ Settings & API Configuration")
+    st.caption("All settings auto-save to Google Sheets when you click Save.")
 
-    # ── Section 1: Gemini AI ─────────────────
-    st.markdown("#### 🤖 Gemini AI Configuration")
+    sid = st.session_state.get("spreadsheet_id","")
+    sheets_ok_s = is_sheets_available() and bool(sid)
 
-    gemini_status = get_genai_install_status()
-    if not gemini_status["installed"]:
-        st.error("""
-        ❌ `google-generativeai` not installed!
+    def _save_to_sheets_if_connected(keys_data: dict = None, settings_data: dict = None):
+        if not sheets_ok_s:
+            return
+        if keys_data:
+            save_api_keys(keys_data, sid)
+        if settings_data:
+            save_settings(settings_data, sid)
 
-        Add this to `requirements.txt`:
-        ```
-        google-generativeai>=0.5.0
-        ```
-        Then redeploy your Streamlit app.
-        """)
+    # ── GCP Credentials (quick link) ──────────
+    if not is_sheets_available():
+        st.warning("⚠️ Go to **📋 Sheets** tab first to connect Google Sheets.")
     else:
-        st.success(f"✅ google-generativeai installed | Keys configured: {gemini_status['key_count']}")
+        st.success(f"✅ Google Sheets connected — data saves automatically")
 
-    with st.expander("🔑 Add Gemini API Keys", expanded=not gemini_status["configured"]):
-        st.markdown("""
-        Get free API keys at [aistudio.google.com](https://aistudio.google.com/app/apikey)
+    st.markdown("---")
 
-        Add multiple keys for automatic rotation when quota is exceeded.
-        """)
-        gemini_keys_text = st.text_area(
-            "Gemini API Keys (one per line)",
-            value="\n".join(st.session_state.gemini_api_keys),
-            placeholder="AIza...\nAIza...\nAIza...",
-            height=120,
-            help="Add multiple keys — system auto-rotates when quota exceeded"
+    # ── Gemini AI ─────────────────────────────
+    st.markdown("#### 🤖 Gemini AI")
+    gemini_status = get_genai_install_status()
+
+    if not gemini_status["installed"]:
+        st.error("google-generativeai not installed. Add to requirements.txt: google-generativeai>=0.5.0")
+    else:
+        st.success(f"✅ Installed · Keys active: {gemini_status['key_count']}")
+
+    with st.expander("🔑 Gemini API Keys", expanded=not gemini_status["configured"]):
+        st.markdown("Get free keys: [aistudio.google.com](https://aistudio.google.com/app/apikey) · Add multiple for auto-rotation")
+        existing_keys = st.session_state.get("gemini_api_keys", [])
+        gemini_text = st.text_area(
+            "API Keys (one per line)",
+            value="\n".join(existing_keys),
+            placeholder="AIzaSy...\nAIzaSy...",
+            height=110,
         )
-        gemini_model = st.selectbox(
-            "Model",
-            ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-preview-05-06", "gemini-2.0-flash", "gemini-1.5-flash"],
-            index=["gemini-2.5-flash-preview-05-20","gemini-2.5-pro-preview-05-06","gemini-2.0-flash","gemini-1.5-flash"].index(
-                st.session_state.gemini_model
-            ) if st.session_state.gemini_model in ["gemini-2.5-flash-preview-05-20","gemini-2.5-pro-preview-05-06","gemini-2.0-flash","gemini-1.5-flash"] else 0
-        )
+        gemini_model = st.selectbox("Model", [
+            "gemini-2.5-flash-preview-05-20",
+            "gemini-2.5-pro-preview-05-06",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+        ], index=0)
 
-        if st.button("💾 Save & Connect Gemini", type="primary"):
-            keys = [k.strip() for k in gemini_keys_text.split("\n") if k.strip()]
-            if not keys:
+        if st.button("💾 Save & Connect Gemini", type="primary", key="save_gemini"):
+            gkeys = [k.strip() for k in gemini_text.split("\n") if k.strip()]
+            if not gkeys:
                 st.error("Enter at least one API key")
             elif not GENAI_AVAILABLE:
                 st.error("Install google-generativeai first")
             else:
                 try:
-                    rotator = initialize_rotator_from_keys(keys, gemini_model)
-                    # Quick test
-                    test = rotator.generate("Say 'OK' in one word.")
-                    if "error" not in test.lower() and len(test) < 50:
-                        st.success(f"✅ Connected! {len(keys)} key(s) | Test: {test.strip()}")
-                    else:
-                        st.success(f"✅ {len(keys)} key(s) saved")
+                    rotator = initialize_rotator_from_keys(gkeys, gemini_model)
+                    st.session_state.gemini_model = gemini_model
+                    # Test connection
+                    test = rotator.generate("Reply with exactly: OK")
+                    # Save to Sheets
+                    keys_data = {f"GEMINI_KEY_{i+1}": k for i,k in enumerate(gkeys)}
+                    keys_data["SPREADSHEET_ID"] = sid
+                    _save_to_sheets_if_connected(keys_data=keys_data)
+                    st.success(f"✅ {len(gkeys)} key(s) saved · Gemini: {test.strip()[:20]}")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Connection failed: {e}")
 
     st.markdown("---")
 
-    # ── Section 2: Binance ───────────────────
+    # ── Binance ───────────────────────────────
     st.markdown("#### 🔶 Binance API")
-    col1,col2 = st.columns(2)
+    col1, col2 = st.columns(2)
     with col1:
         b_key = st.text_input("API Key", value=st.session_state.binance_api_key,
-                              type="password", key="b_key_input")
+                              type="password", key="b_key_in")
     with col2:
         b_sec = st.text_input("Secret Key", value=st.session_state.binance_api_secret,
-                              type="password", key="b_sec_input")
+                              type="password", key="b_sec_in")
     b_testnet = st.checkbox("Use Testnet (Paper Trading)", value=True)
 
-    if st.button("💾 Save Binance Keys"):
+    if st.button("💾 Save Binance Keys", key="save_binance"):
         st.session_state.binance_api_key    = b_key
         st.session_state.binance_api_secret = b_sec
-        st.success("Binance keys saved ✓")
+        _save_to_sheets_if_connected(keys_data={
+            "BINANCE_API_KEY": b_key, "BINANCE_API_SECRET": b_sec
+        })
+        st.success("✅ Binance keys saved" + (" to Sheets" if sheets_ok_s else " (local only)"))
 
     st.markdown("---")
 
-    # ── Section 3: Telegram / Email ──────────
-    st.markdown("#### 📬 Alerts")
-    col1,col2 = st.columns(2)
+    # ── Telegram ──────────────────────────────
+    st.markdown("#### 📬 Telegram Alerts")
+    col1, col2 = st.columns(2)
     with col1:
-        t_tok = st.text_input("Telegram Bot Token", value=st.session_state.telegram_token,
-                              type="password")
-        t_cid = st.text_input("Telegram Chat ID",   value=st.session_state.telegram_chat_id)
+        t_tok = st.text_input("Bot Token",
+                              value=st.session_state.telegram_token, type="password")
     with col2:
-        e_sender = st.text_input("Gmail Sender", placeholder="you@gmail.com")
-        e_pass   = st.text_input("App Password", type="password")
+        t_cid = st.text_input("Chat ID", value=st.session_state.telegram_chat_id)
 
-    if st.button("💾 Save Alert Settings"):
+    if st.button("💾 Save Telegram", key="save_tg"):
         st.session_state.telegram_token   = t_tok
         st.session_state.telegram_chat_id = t_cid
-        st.success("Alert settings saved ✓")
+        _save_to_sheets_if_connected(keys_data={
+            "TELEGRAM_TOKEN": t_tok, "TELEGRAM_CHAT_ID": t_cid
+        })
+        st.success("✅ Telegram settings saved" + (" to Sheets" if sheets_ok_s else " (local only)"))
 
-    st.markdown("---")
-
-    # ── Section 4: Google Sheets Credentials ─
-    st.markdown("#### 📋 Google Sheets Credentials")
-    cred_json = st.text_area(
-        "Service Account JSON",
-        placeholder='{"type":"service_account","project_id":"...","private_key":"..."}',
-        height=120,
-        help="Paste your downloaded service_account.json content here"
-    )
-    if st.button("💾 Save GCP Credentials"):
-        if cred_json.strip():
+        # Quick test
+        if t_tok and t_cid:
+            import requests as _req
             try:
-                import json
-                st.session_state.gcp_credentials = json.loads(cred_json)
-                st.success("✅ Credentials saved")
-            except Exception:
-                st.error("Invalid JSON. Paste the entire service_account.json content.")
+                r = _req.post(
+                    f"https://api.telegram.org/bot{t_tok}/sendMessage",
+                    data={"chat_id": t_cid, "text": "✅ CryptoAI Terminal connected!"},
+                    timeout=5
+                )
+                if r.status_code == 200:
+                    st.success("📬 Test message sent to Telegram!")
+                else:
+                    st.warning(f"Telegram error: {r.json().get('description','unknown')}")
+            except Exception as e:
+                st.warning(f"Telegram test failed: {e}")
 
     st.markdown("---")
 
-    # ── Section 5: Trading Parameters ────────
+    # ── Trading Parameters ────────────────────
     st.markdown("#### 📊 Trading Parameters")
-    col1,col2,col3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        rp = st.number_input("Risk per trade (%)", 0.5, 10.0,
-                             st.session_state.risk_pct, 0.5, key="risk_input")
-        st.session_state.risk_pct = rp
+        rp = st.number_input("Risk per trade (%)", 0.5, 10.0, float(st.session_state.risk_pct), 0.5)
     with col2:
-        st.number_input("Risk:Reward ratio", 1.0, 5.0, 2.0, 0.5)
+        rr = st.number_input("Risk:Reward ratio", 1.0, 5.0, 2.0, 0.5)
     with col3:
-        st.number_input("Max daily loss (%)", 1.0, 20.0, 5.0, 1.0)
+        ml = st.number_input("Max daily loss (%)", 1.0, 20.0, 5.0, 1.0)
+
+    if st.button("💾 Save Trading Settings", key="save_trading"):
+        st.session_state.risk_pct = rp
+        _save_to_sheets_if_connected(settings_data={
+            "risk_pct": rp, "rr_ratio": rr, "max_daily_loss": ml,
+            "timeframe": st.session_state.timeframe,
+            "coins": ",".join(st.session_state.coins),
+            "auto_trading": st.session_state.auto_trading,
+            "ai_signals": st.session_state.ai_signals,
+            "gemini_model": st.session_state.gemini_model,
+        })
+        st.success("✅ Trading settings saved" + (" to Sheets" if sheets_ok_s else " (local only)"))
 
     st.markdown("---")
 
-    # ── Section 6: Streamlit secrets template ─
+    # ── Secrets template ──────────────────────
     with st.expander("📋 Streamlit Cloud Secrets Template"):
         st.code("""
-# Add this in Streamlit Cloud → Settings → Secrets
-
-GEMINI_API_KEYS = "AIza...key1,AIza...key2"
-GEMINI_API_KEY  = "AIza...key1"
+GEMINI_API_KEYS = "AIzaSy...key1,AIzaSy...key2"
+SPREADSHEET_ID  = "your_sheet_id_here"
 
 BINANCE_API_KEY    = "your_binance_key"
 BINANCE_API_SECRET = "your_binance_secret"
@@ -986,20 +1111,17 @@ BINANCE_API_SECRET = "your_binance_secret"
 TELEGRAM_BOT_TOKEN = "your_bot_token"
 TELEGRAM_CHAT_ID   = "your_chat_id"
 
-SPREADSHEET_ID = "your_google_sheet_id"
-
 [gcp_service_account]
-type = "service_account"
-project_id = "your-project"
-private_key_id = "key-id"
-private_key = "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----\\n"
-client_email = "name@project.iam.gserviceaccount.com"
-client_id = "123456789"
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
+type                        = "service_account"
+project_id                  = "your-project-id"
+private_key_id              = "key_id_here"
+private_key                 = "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----\n"
+client_email                = "cryptoai@your-project.iam.gserviceaccount.com"
+client_id                   = "123456789"
+auth_uri                    = "https://accounts.google.com/o/oauth2/auth"
+token_uri                   = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url        = "https://www.googleapis.com/robot/v1/metadata/..."
         """, language="toml")
 
-    st.markdown("""
-    > **⚠️ Disclaimer:** For educational purposes only.
-    > Cryptocurrency trading involves significant risk. Never risk money you can't afford to lose.
-    """)
+    st.markdown("> ⚠️ Educational use only. Never risk money you cannot afford to lose.")
