@@ -1,120 +1,176 @@
-# ⚡ CryptoAI Terminal
+# 📊 CryptoAI Trader
 
-**Binance + Gemini AI + ML Signals + SMC + Elliott Wave + Backtesting**
-
----
-
-## ✅ Features
-
-| Feature | Status |
-|---|---|
-| Multi-coin selection | ✅ |
-| Live price dashboard | ✅ |
-| AI signals (BUY/SELL) per coin | ✅ |
-| Chart per coin with indicators | ✅ |
-| Auto ML model training | ✅ |
-| Clean dark UI | ✅ |
-| SMC (Order Block + FVG) | ✅ |
-| Elliott Wave auto detection | ✅ |
-| News + sentiment filter | ✅ |
-| Backtesting system | ✅ |
-| Auto compounding strategy | ✅ |
-| RSI, EMA, MACD, Bollinger | ✅ |
-| ML model (XGBoost) | ✅ |
-| Multi-timeframe | ✅ |
-| Risk management | ✅ |
-| Gemini API 7-key rotation | ✅ |
+A modular, production-ready cryptocurrency trading analysis system with AI signals, Smart Money Concepts, and a live dashboard.
 
 ---
 
-## 🚀 Quick Start
+## 🏗️ Project Structure
 
-### 1. Clone the repo
-```bash
-git clone https://github.com/YOUR_USERNAME/crypto-ai-terminal.git
-cd crypto-ai-terminal
+```
+crypto_trading/
+├── config/
+│   ├── settings.py       ← All configuration (API keys, thresholds)
+│   └── logger.py         ← Centralized logging
+├── data/
+│   └── fetcher.py        ← Binance API + Demo data generator
+├── strategy/
+│   ├── indicators.py     ← RSI, EMA, MACD, Bollinger Bands
+│   ├── smc.py            ← Smart Money Concepts (OB, FVG, BOS, CHOCH)
+│   └── signal_engine.py  ← BUY/SELL/HOLD signal generator
+├── ui/
+│   └── dashboard.py      ← Streamlit web dashboard
+├── models/               ← ML models (Phase 5)
+├── backtest/             ← Backtesting engine (Phase 4)
+├── logs/                 ← Auto-generated log files
+├── .env.example          ← API key template
+├── requirements.txt
+├── main.py               ← CLI entry point
+└── README.md
 ```
 
-### 2. Install dependencies
+---
+
+## ⚡ Quick Start (5 minutes)
+
+### Step 1: Clone / Download
+
+```bash
+git clone https://github.com/yourusername/cryptoai-trader.git
+cd cryptoai-trader
+```
+
+### Step 2: Create Virtual Environment
+
+```bash
+python -m venv venv
+
+# Windows:
+venv\Scripts\activate
+
+# Mac/Linux:
+source venv/bin/activate
+```
+
+### Step 3: Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure API Keys
+### Step 4: Configure Environment
 
-**Copy the secrets template:**
 ```bash
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# Copy the template
+cp .env.example .env
+
+# Edit .env with your settings (optional for demo mode)
+# DEMO_MODE=True means no API key needed!
 ```
 
-**Edit `.streamlit/secrets.toml`:**
-```toml
-[binance]
-api_key = "your_binance_key"
-api_secret = "your_binance_secret"
+### Step 5: Run
 
-[gemini]
-key_1 = "AIza..."
-key_2 = "AIza..."
-# ... up to key_7
+**Option A: CLI Signal Scan (no browser needed)**
+```bash
+python main.py
 ```
 
-**Also update `utils/gemini_rotator.py`** with your 7 Gemini keys in the `GEMINI_API_KEYS` list.
-
-### 4. Run locally
+**Option B: Full Web Dashboard**
 ```bash
-streamlit run app.py
+streamlit run ui/dashboard.py
+```
+
+Then open: http://localhost:8501
+
+---
+
+## 🔑 API Keys Setup (Optional)
+
+The system works in **Demo Mode** without any API keys.
+
+To use **real Binance data**:
+
+1. Go to [Binance API Management](https://www.binance.com/en/my/settings/api-management)
+2. Create a new API key (enable "Read" permissions only for data)
+3. Add to your `.env` file:
+
+```env
+BINANCE_API_KEY=your_key_here
+BINANCE_API_SECRET=your_secret_here
+BINANCE_TESTNET=True    # Keep True for safety
+DEMO_MODE=False         # Switch to live data
 ```
 
 ---
 
-## ☁️ Deploy to Streamlit Cloud
+## 📦 Build Phases
 
-1. Push this repo to GitHub
+| Phase | Status | Description |
+|-------|--------|-------------|
+| ✅ Phase 1 | Complete | Data fetching, Indicators, SMC, Signal Engine, Dashboard |
+| 🔄 Phase 2 | Next | Elliott Wave Detection, Multi-timeframe analysis |
+| 📋 Phase 3 | Planned | News filter, Telegram/Email alerts |
+| 📋 Phase 4 | Planned | Backtesting engine with metrics |
+| 📋 Phase 5 | Planned | ML model (LSTM/XGBoost) + auto-training |
+| 📋 Phase 6 | Planned | Auto trading execution + risk management |
+
+---
+
+## 🧠 How Signals Work
+
+Signals combine two scoring systems:
+
+**Technical Indicators (50% weight)**
+- RSI: Oversold = BUY, Overbought = SELL
+- EMA Stack: Bullish alignment = BUY
+- MACD: Crossovers
+- Bollinger Bands: Price at extremes
+- Volume: Spike confirms signal direction
+
+**Smart Money Concepts (50% weight)**
+- BOS/CHOCH: Trend direction and reversals
+- Order Blocks: Institutional demand/supply zones
+- Fair Value Gaps: Price imbalance areas
+- Liquidity Zones: For SL/TP placement
+
+**Final Output:**
+- BUY/SELL: when score difference ≥ 20 points
+- HOLD: ambiguous market
+- Confidence: 50% base + score difference
+
+---
+
+## 🚀 Deployment
+
+### Streamlit Cloud (Free)
+1. Push to GitHub
 2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Connect your GitHub repo
-4. Set `app.py` as the main file
-5. In **App Settings → Secrets**, paste your secrets.toml contents
-6. Click Deploy!
+3. Connect repo → select `ui/dashboard.py`
+4. Add API keys as Secrets
 
----
+### VPS (Ubuntu)
+```bash
+# Install dependencies
+sudo apt update && sudo apt install python3-pip -y
+pip install -r requirements.txt
 
-## 📁 Project Structure
+# Run with screen (keeps running after logout)
+screen -S trader
+streamlit run ui/dashboard.py --server.port 8501
 
+# Press Ctrl+A, D to detach
 ```
-crypto-ai-terminal/
-├── app.py                  # Main Streamlit app
-├── requirements.txt        # Python dependencies
-├── .streamlit/
-│   ├── config.toml         # UI theme config
-│   └── secrets.toml.example
-├── utils/
-│   ├── binance_data.py     # Binance API fetcher
-│   ├── indicators.py       # RSI, EMA, SMC, FVG, Elliott Wave
-│   ├── ml_model.py         # XGBoost training & prediction
-│   ├── charts.py           # Plotly charts
-│   ├── gemini_rotator.py   # Gemini 7-key rotation
-│   ├── news_fetcher.py     # Crypto news + sentiment
-│   └── risk_manager.py     # Position sizing, SL/TP, compounding
-└── models/                 # Saved ML models (auto-created)
-```
-
----
-
-## 🔑 Getting API Keys
-
-### Binance API
-1. Login to [binance.com](https://binance.com)
-2. Profile → API Management → Create API
-3. Enable **Read Only** permissions (no trading needed for analysis)
-
-### Gemini API (7 keys for rotation)
-1. Go to [aistudio.google.com](https://aistudio.google.com)
-2. Create API key (free tier has rate limits — that's why we use 7!)
-3. Repeat 7 times with different Google accounts or projects
 
 ---
 
 ## ⚠️ Disclaimer
 
-This tool is for **educational purposes only**. Crypto trading involves significant risk. Always do your own research. Not financial advice.
+This software is for **educational and research purposes only**.  
+Cryptocurrency trading involves significant financial risk.  
+Never trade with money you cannot afford to lose.  
+Past signal performance does not guarantee future results.
+
+---
+
+## 📝 License
+
+MIT License - Free to use and modify.
