@@ -1,0 +1,4 @@
+2026-04-26 08:06:08,357 | INFO | strategy.signal_engine | Signal [BTCUSDT] HOLD | Conf: 55.0% | Price: 73265.1275 | SL: 73265.1275 | TP: 73265.1275
+2026-04-26 08:06:08,494 | INFO | strategy.signal_engine | Signal [ETHUSDT] BUY | Conf: 82.5% | Price: 2577.4453 | SL: 2538.7836 | TP: 2654.7687
+2026-04-26 08:06:08,640 | INFO | strategy.signal_engine | Signal [SOLUSDT] BUY | Conf: 72.5% | Price: 165.1340 | SL: 151.4662 | TP: 192.4696
+2026-04-26 08:06:08,782 | INFO | strategy.signal_engine | Signal [XRPUSDT] BUY | Conf: 77.5% | Price: 1.1642 | SL: 1.0632 | TP: 1.3661
