@@ -231,21 +231,55 @@ with st.sidebar:
     st.markdown("<small style='color:#4a5568'>Terminal v2.0</small>", unsafe_allow_html=True)
     st.markdown("---")
 
-    # Status indicators
-    gemini_ok = is_gemini_available()
-    sheets_ok = is_sheets_available()
-    binance_ok = bool(st.session_state.binance_api_key)
+    # ── Detailed API Status Panel ────────────
+    gemini_ok   = is_gemini_available()
+    sheets_ok   = is_sheets_available()
+    binance_ok  = bool(st.session_state.binance_api_key)
+    tg_ok       = bool(st.session_state.telegram_token)
+    genai_info  = get_genai_install_status()
+    sheets_info = get_sheets_status()
 
-    st.markdown(f"""
-    <div style='font-size:0.78em; line-height:2'>
-    <span class='status-dot {"dot-green" if gemini_ok else "dot-red"}'></span>
-    Gemini AI: {'Connected' if gemini_ok else 'Not configured'}<br>
-    <span class='status-dot {"dot-green" if sheets_ok else "dot-yellow"}'></span>
-    Google Sheets: {'Connected' if sheets_ok else 'Not configured'}<br>
-    <span class='status-dot {"dot-green" if binance_ok else "dot-yellow"}'></span>
-    Binance: {'Key set' if binance_ok else 'Demo mode'}
-    </div>
-    """, unsafe_allow_html=True)
+    def _status_row(label, ok, detail="", warn=False):
+        if ok:
+            dot="dot-green"; badge="LIVE"; bc="#00ff8822"; tc="#00ff88"
+        elif warn:
+            dot="dot-yellow"; badge="DEMO"; bc="#ffbb0022"; tc="#ffbb00"
+        else:
+            dot="dot-red"; badge="OFF"; bc="#ff335522"; tc="#ff3355"
+        d_html = f"<div style='font-size:0.68em;color:#4a5568;padding:0 8px 4px'>{detail}</div>" if detail else ""
+        return (f"<div style='display:flex;align-items:center;justify-content:space-between;"
+                f"background:{bc};border-radius:6px;padding:5px 8px;margin:3px 0;font-size:0.75em'>"
+                f"<span><span class='status-dot {dot}'></span>{label}</span>"
+                f"<span style='color:{tc};font-weight:700;font-size:0.85em'>{badge}</span></div>{d_html}")
+
+    if gemini_ok:
+        rotator  = get_gemini_rotator()
+        g_detail = f"Keys: {genai_info['key_count']} · Model: {st.session_state.get('gemini_model','flash')[:12]}"
+    elif genai_info["installed"]:
+        g_detail = "Installed · No API key"
+    else:
+        g_detail = "Package missing → add to requirements.txt"
+
+    if sheets_ok:
+        sid      = st.session_state.spreadsheet_id
+        s_detail = f"Sheet: {sid[:18]}..." if sid else "Auth OK · No sheet ID"
+    elif sheets_info.get("library_installed"):
+        s_detail = "Installed · No credentials"
+    else:
+        s_detail = "gspread not installed"
+
+    b_detail = f"Key: {st.session_state.binance_api_key[:8]}..." if binance_ok else "Using demo data (safe)"
+    t_detail = "Alerts enabled" if tg_ok else "Not configured"
+
+    st.markdown(
+        _status_row("🤖 Gemini AI",    gemini_ok,  g_detail, warn=False) +
+        _status_row("📋 Google Sheets",sheets_ok,  s_detail, warn=not sheets_ok) +
+        _status_row("🔶 Binance",      binance_ok, b_detail, warn=not binance_ok) +
+        _status_row("📬 Telegram",     tg_ok,      t_detail, warn=not tg_ok),
+        unsafe_allow_html=True
+    )
+    if st.button("🔄 Check Status", use_container_width=True):
+        st.rerun()
 
     st.markdown("---")
     st.markdown("**🪙 Coins**")
