@@ -348,8 +348,8 @@ with tab_dash:
             return "color:#00ff88" if float(v.replace("%","").replace("+",""))>=0 else "color:#ff3355"
 
         st.dataframe(
-            df_tbl.style.applymap(_color_sig, subset=["Signal"])
-                        .applymap(_color_ch, subset=["24h"]),
+            df_tbl.style.map(_color_sig, subset=["Signal"])
+                        .map(_color_ch, subset=["24h"]),
             use_container_width=True, height=220
         )
 
