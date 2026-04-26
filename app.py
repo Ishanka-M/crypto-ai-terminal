@@ -687,9 +687,10 @@ with tab_backtest:
 
                 # Equity curve
                 fig_eq = go.Figure()
-                fig_eq.add_trace(go.Scatter(y=equity,mode="lines",name="Equity",
-                    fill="tozeroy",fillcolor=f"{pnl_c}11",
-                    line=dict(color=pnl_c,width=2)))
+                fill_rgba = "rgba(0,255,136,0.08)" if pnl >= 0 else "rgba(255,51,85,0.08)"
+                fig_eq.add_trace(go.Scatter(y=equity, mode="lines", name="Equity",
+                    fill="tozeroy", fillcolor=fill_rgba,
+                    line=dict(color=pnl_c, width=2)))
                 fig_eq.add_hline(y=bt_bal,line_dash="dash",line_color="#4a5568")
                 fig_eq.update_layout(height=280,paper_bgcolor="#060910",plot_bgcolor="#0c1117",
                     font=dict(color="#c9d1d9"),margin=dict(l=8,r=8,t=30,b=8),
