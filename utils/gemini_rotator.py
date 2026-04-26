@@ -23,8 +23,8 @@ except ImportError:
     genai = None
 
 # ── Default model ───────────────────────────
-DEFAULT_MODEL  = "gemini-1.5-flash"
-DEFAULT_MODEL2 = "gemini-1.5-pro"
+DEFAULT_MODEL  = "gemini-2.5-flash-preview-05-20"
+DEFAULT_MODEL2 = "gemini-2.5-pro-preview-05-06"
 
 
 # ─────────────────────────────────────────

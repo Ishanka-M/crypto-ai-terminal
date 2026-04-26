@@ -163,7 +163,7 @@ DEFAULTS = {
     "telegram_token": "",
     "telegram_chat_id": "",
     "spreadsheet_id": "",
-    "gemini_model": "gemini-1.5-flash",
+    "gemini_model": "gemini-2.5-flash-preview-05-20",
     "gcp_credentials": None,
     "signals_cache": {},
     "chat_history": [],
@@ -877,10 +877,10 @@ with tab_settings:
         )
         gemini_model = st.selectbox(
             "Model",
-            ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
-            index=["gemini-1.5-flash","gemini-1.5-pro","gemini-2.0-flash-exp"].index(
+            ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-preview-05-06", "gemini-2.0-flash", "gemini-1.5-flash"],
+            index=["gemini-2.5-flash-preview-05-20","gemini-2.5-pro-preview-05-06","gemini-2.0-flash","gemini-1.5-flash"].index(
                 st.session_state.gemini_model
-            ) if st.session_state.gemini_model in ["gemini-1.5-flash","gemini-1.5-pro","gemini-2.0-flash-exp"] else 0
+            ) if st.session_state.gemini_model in ["gemini-2.5-flash-preview-05-20","gemini-2.5-pro-preview-05-06","gemini-2.0-flash","gemini-1.5-flash"] else 0
         )
 
         if st.button("💾 Save & Connect Gemini", type="primary"):
