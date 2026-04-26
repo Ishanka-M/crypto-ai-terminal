@@ -1,519 +1,970 @@
-"""
-🚀 CryptoAI Terminal v2
-Binance + Multi-API fallback + Supabase + Email Alerts + Trade Tracker
-"""
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# app.py
+# ============================================
+# CryptoAI Terminal — Main Application
+# Streamlit Cloud Ready | All Phases Included
+# ============================================
 
 import streamlit as st
 import pandas as pd
-import time
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
+import time
+import os
+import sys
 
-st.set_page_config(page_title="CryptoAI Terminal", page_icon="🚀",
-                   layout="wide", initial_sidebar_state="expanded")
+# ── Path setup ──────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── Page config (MUST be first Streamlit call) ──
+st.set_page_config(
+    page_title="CryptoAI Terminal",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Safe imports (no crash if package missing) ──
+try:
+    from utils.gemini_rotator import (
+        get_gemini_rotator, initialize_rotator_from_keys,
+        quick_chat, is_gemini_available, get_genai_install_status,
+        GENAI_AVAILABLE,
+    )
+except Exception as e:
+    GENAI_AVAILABLE = False
+    def quick_chat(p, s=""): return "⚠️ Gemini not available"
+    def is_gemini_available(): return False
+    def get_genai_install_status(): return {"installed": False, "configured": False, "key_count": 0}
+    def initialize_rotator_from_keys(k, m=""): return None
+    def get_gemini_rotator(): return None
+
+try:
+    from utils.sheets_manager import (
+        save_api_keys_to_sheet, load_api_keys_from_sheet,
+        save_settings_to_sheet, load_settings_from_sheet,
+        log_signal_to_sheet, get_trade_history,
+        is_sheets_available, get_sheets_status,
+    )
+    SHEETS_AVAILABLE = True
+except Exception:
+    SHEETS_AVAILABLE = False
+    def save_api_keys_to_sheet(*a, **k): return False
+    def load_api_keys_from_sheet(*a, **k): return {}
+    def save_settings_to_sheet(*a, **k): return False
+    def load_settings_from_sheet(*a, **k): return {}
+    def log_signal_to_sheet(*a, **k): return False
+    def get_trade_history(*a, **k): return pd.DataFrame()
+    def is_sheets_available(): return False
+    def get_sheets_status(): return {"library_installed": False, "authenticated": False}
+
+
+# ─────────────────────────────────────────
+# DEMO DATA ENGINE
+# ─────────────────────────────────────────
+
+def generate_ohlcv(symbol: str, tf: str = "1h", limit: int = 300) -> pd.DataFrame:
+    BASE = {"BTCUSDT": 65000, "ETHUSDT": 3500, "SOLUSDT": 180,
+            "XRPUSDT": 0.60, "BNBUSDT": 580, "ADAUSDT": 0.45}
+    base = BASE.get(symbol, 100)
+    TF_MIN = {"1m":1,"5m":5,"15m":15,"1h":60,"4h":240,"1d":1440}
+    mins = TF_MIN.get(tf, 60)
+    from datetime import timedelta
+    end = datetime.now()
+    ts = [end - timedelta(minutes=mins*i) for i in range(limit,0,-1)]
+    np.random.seed(hash(symbol) % 999)
+    rets = np.random.normal(0.0002, 0.015, limit)
+    prices = base * np.cumprod(1 + rets)
+    rows = []
+    for i,(t,c) in enumerate(zip(ts,prices)):
+        vol = c * np.random.uniform(0.003, 0.018)
+        o = prices[i-1] if i>0 else c
+        rows.append({"timestamp":t,"open":round(o,4),"high":round(max(o,c)+abs(np.random.normal(0,vol)),4),
+                     "low":round(min(o,c)-abs(np.random.normal(0,vol)),4),
+                     "close":round(c,4),"volume":round(np.random.uniform(100,5000)*base/100,2)})
+    df = pd.DataFrame(rows).set_index("timestamp")
+    return df
+
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    close = df["close"]
+    # RSI
+    d = close.diff()
+    g = d.where(d>0,0).ewm(com=13,min_periods=14).mean()
+    l = (-d.where(d<0,0)).ewm(com=13,min_periods=14).mean()
+    df["rsi"] = (100 - 100/(1+g/l.replace(0,np.nan))).fillna(50)
+    # EMAs
+    for p in [9,21,50,200]: df[f"ema{p}"] = close.ewm(span=p,adjust=False).mean()
+    # MACD
+    df["macd"] = close.ewm(span=12,adjust=False).mean() - close.ewm(span=26,adjust=False).mean()
+    df["macd_sig"] = df["macd"].ewm(span=9,adjust=False).mean()
+    df["macd_hist"] = df["macd"] - df["macd_sig"]
+    # BB
+    sma = close.rolling(20).mean(); std = close.rolling(20).std()
+    df["bb_up"] = sma+2*std; df["bb_lo"] = sma-2*std; df["bb_mid"] = sma
+    df["bb_pct"] = ((close-df["bb_lo"])/(df["bb_up"]-df["bb_lo"])).clip(0,1)
+    # Volume
+    df["vol_ma"] = df["volume"].rolling(20).mean()
+    df["vol_ratio"] = df["volume"]/df["vol_ma"]
+    df["trend_up"]  = (df["ema9"]>df["ema21"]) & (df["ema21"]>df["ema50"])
+    df["trend_dn"]  = (df["ema9"]<df["ema21"]) & (df["ema21"]<df["ema50"])
+    return df
+
+
+def generate_signal(symbol: str, df: pd.DataFrame, tf: str) -> dict:
+    last = df.iloc[-1]
+    buy_pts = sell_pts = 0
+    reasons = []
+    rsi = last["rsi"]
+    if rsi < 32:  buy_pts+=25; reasons.append(f"RSI oversold ({rsi:.1f})")
+    elif rsi > 68: sell_pts+=25; reasons.append(f"RSI overbought ({rsi:.1f})")
+    if last["trend_up"]:  buy_pts+=25; reasons.append("EMA bullish stack")
+    elif last["trend_dn"]: sell_pts+=25; reasons.append("EMA bearish stack")
+    if last["macd"]>last["macd_sig"] and last["macd_hist"]>0: buy_pts+=20; reasons.append("MACD bullish")
+    elif last["macd"]<last["macd_sig"] and last["macd_hist"]<0: sell_pts+=20; reasons.append("MACD bearish")
+    if last["bb_pct"]<0.2: buy_pts+=15; reasons.append("Near BB lower band")
+    elif last["bb_pct"]>0.8: sell_pts+=15; reasons.append("Near BB upper band")
+    if last["vol_ratio"]>1.5:
+        if buy_pts>sell_pts: buy_pts+=15; reasons.append(f"High volume confirms ({last['vol_ratio']:.1f}x)")
+        else: sell_pts+=15; reasons.append(f"High volume confirms ({last['vol_ratio']:.1f}x)")
+    diff = buy_pts - sell_pts
+    price = float(last["close"])
+    atr = float(df["high"].iloc[-20:].max() - df["low"].iloc[-20:].min()) * 0.03
+    if diff >= 20:
+        sig = "BUY"; conf = min(50+diff, 92)
+        sl = price - atr*1.5; tp = price + atr*3
+    elif diff <= -20:
+        sig = "SELL"; conf = min(50+abs(diff), 92)
+        sl = price + atr*1.5; tp = price - atr*3
+    else:
+        sig = "HOLD"; conf = 45; sl = price; tp = price
+    rr = abs(tp-price)/abs(sl-price) if abs(sl-price)>0 else 0
+    return {"symbol":symbol,"signal":sig,"confidence":round(conf,1),"price":price,
+            "stop_loss":round(sl,4),"take_profit":round(tp,4),"risk_reward":round(rr,2),
+            "timeframe":tf,"reason":reasons,"timestamp":str(df.index[-1])}
+
+
+# ─────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────
+
+DEFAULTS = {
+    "coins": ["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT"],
+    "timeframe": "1h",
+    "risk_pct": 1.0,
+    "auto_trading": False,
+    "ai_signals": True,
+    "news_filter": True,
+    "binance_api_key": "",
+    "binance_api_secret": "",
+    "gemini_api_keys": [],
+    "telegram_token": "",
+    "telegram_chat_id": "",
+    "spreadsheet_id": "",
+    "gemini_model": "gemini-1.5-flash",
+    "gcp_credentials": None,
+    "signals_cache": {},
+    "chat_history": [],
+    "trade_log": [],
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+# ─────────────────────────────────────────
+# GLOBAL CSS — Terminal Dark Theme
+# ─────────────────────────────────────────
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
-html,body,[class*="css"]{font-family:'Rajdhani',sans-serif;background:#0A0E1A;}
-.stApp{background:#0A0E1A;}
-.main-title{font-family:'Share Tech Mono',monospace;font-size:2.2rem;color:#00FFA3;
-    text-shadow:0 0 20px rgba(0,255,163,0.5);letter-spacing:4px;margin-bottom:0;}
-.sub-title{color:#4488FF;font-size:0.9rem;letter-spacing:6px;font-family:'Share Tech Mono',monospace;}
-.metric-card{background:linear-gradient(135deg,#111827 0%,#0D1520 100%);
-    border:1px solid #1E2A3A;border-radius:8px;padding:16px;text-align:center;
-    position:relative;overflow:hidden;}
-.metric-card::before{content:'';position:absolute;top:0;left:0;width:100%;height:2px;
-    background:linear-gradient(90deg,#00FFA3,#4488FF);}
-.metric-value{font-family:'Share Tech Mono',monospace;font-size:1.6rem;color:#00FFA3;font-weight:bold;}
-.metric-label{color:#64748B;font-size:0.75rem;letter-spacing:2px;text-transform:uppercase;}
-.price-card{background:#111827;border:1px solid #1E2A3A;border-radius:8px;padding:12px;margin:4px 0;}
-section[data-testid="stSidebar"]{background:#0D1520 !important;border-right:1px solid #1E2A3A;}
-.stTabs [data-baseweb="tab-list"]{background:#111827;border-radius:8px;gap:4px;}
-.stTabs [data-baseweb="tab"]{color:#64748B;font-family:'Share Tech Mono',monospace;font-size:0.8rem;}
-.stTabs [aria-selected="true"]{color:#00FFA3 !important;background:rgba(0,255,163,0.1) !important;}
-.stButton>button{background:linear-gradient(135deg,#00FFA3,#4488FF);color:#0A0E1A;
-    border:none;border-radius:6px;font-family:'Share Tech Mono',monospace;font-weight:bold;}
-hr{border-color:#1E2A3A;}
-::-webkit-scrollbar{width:4px;}
-::-webkit-scrollbar-thumb{background:#1E2A3A;border-radius:2px;}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
-.live-dot{display:inline-block;width:8px;height:8px;background:#00FFA3;
-    border-radius:50%;animation:blink 1.5s infinite;margin-right:6px;}
-.win-badge{background:rgba(0,255,163,0.15);border:1px solid #00FFA3;color:#00FFA3;
-    padding:2px 10px;border-radius:12px;font-size:0.8rem;font-family:monospace;}
-.loss-badge{background:rgba(255,68,102,0.15);border:1px solid #FF4466;color:#FF4466;
-    padding:2px 10px;border-radius:12px;font-size:0.8rem;font-family:monospace;}
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;700;800&display=swap');
+
+:root {
+  --bg:      #060910;
+  --surface: #0c1117;
+  --panel:   #111827;
+  --border:  #1e2d3d;
+  --accent:  #00d4ff;
+  --green:   #00ff88;
+  --red:     #ff3355;
+  --yellow:  #ffbb00;
+  --text:    #c9d1d9;
+  --muted:   #4a5568;
+}
+
+.stApp                    { background: var(--bg); font-family: 'JetBrains Mono', monospace; }
+.stSidebar                { background: var(--surface) !important; border-right: 1px solid var(--border); }
+h1,h2,h3                  { font-family: 'Syne', sans-serif !important; color: var(--accent) !important; }
+.stButton > button        { background: transparent; border: 1px solid var(--accent); color: var(--accent);
+                            font-family: 'JetBrains Mono'; border-radius: 6px; transition: all .2s; }
+.stButton > button:hover  { background: var(--accent)22; }
+.stTextInput input, .stTextArea textarea, .stSelectbox select {
+  background: var(--panel) !important; border: 1px solid var(--border) !important;
+  color: var(--text) !important; font-family: 'JetBrains Mono' !important; }
+.stTabs [data-baseweb="tab"]           { color: var(--muted); font-family: 'JetBrains Mono'; font-size: 0.8em; }
+.stTabs [aria-selected="true"]         { color: var(--accent) !important; border-bottom-color: var(--accent) !important; }
+div[data-testid="metric-container"]    { background: var(--panel); border: 1px solid var(--border);
+                                         border-radius: 10px; padding: 12px; }
+.stDataFrame                           { background: var(--panel) !important; }
+.card { background:var(--panel); border:1px solid var(--border); border-radius:12px;
+        padding:16px; margin:8px 0; }
+.sig-buy  { border-color:var(--green)88 !important; background:linear-gradient(135deg,#0a1f14,#0d1117); }
+.sig-sell { border-color:var(--red)88   !important; background:linear-gradient(135deg,#1f0a0d,#0d1117); }
+.sig-hold { border-color:var(--yellow)88!important; background:linear-gradient(135deg,#1f1a0a,#0d1117); }
+.status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+.dot-green  { background:var(--green); box-shadow:0 0 8px var(--green); }
+.dot-red    { background:var(--red);   box-shadow:0 0 8px var(--red); }
+.dot-yellow { background:var(--yellow);box-shadow:0 0 8px var(--yellow); }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Imports ───────────────────────────────────────────────────────────────────
-from utils.binance_data import (get_live_price, get_klines, get_api_status,
-                                 POPULAR_COINS, TIMEFRAMES)
-from utils.indicators import run_all_indicators, detect_structure, detect_elliott_wave
-from utils.ml_model import train_model, predict_signal, run_backtest
-from utils.charts import create_candlestick_chart, create_equity_curve, create_compound_chart
-from utils.gemini_rotator import get_gemini_rotator
-from utils.news_fetcher import fetch_news, get_overall_market_sentiment
-from utils.risk_manager import (calculate_position_size, calculate_sl_tp,
-                                 auto_compound, kelly_criterion, get_risk_label)
-from utils.gsheets_db import (save_trade, close_trade, get_trades,
-                               get_trade_stats, save_alert, get_alerts,
-                               update_stats_sheet, is_configured, SETUP_GUIDE)
-from utils.email_alerts import send_alert_email, send_test_email
 
-# ── Header ────────────────────────────────────────────────────────────────────
-c1, c2 = st.columns([3,1])
-with c1:
-    st.markdown('<div class="main-title">⚡ CRYPTO AI TERMINAL</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">BINANCE · SMC · ELLIOTT · ML · GEMINI AI</div>', unsafe_allow_html=True)
-with c2:
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    st.markdown(f'<div style="text-align:right;color:#64748B;font-family:monospace;font-size:0.8rem;margin-top:16px;"><span class="live-dot"></span>LIVE · {now}</div>', unsafe_allow_html=True)
+# ─────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────
 
+with st.sidebar:
+    st.markdown("<h2 style='margin:0;letter-spacing:2px'>📡 CRYPTOAI</h2>", unsafe_allow_html=True)
+    st.markdown("<small style='color:#4a5568'>Terminal v2.0</small>", unsafe_allow_html=True)
+    st.markdown("---")
+
+    # Status indicators
+    gemini_ok = is_gemini_available()
+    sheets_ok = is_sheets_available()
+    binance_ok = bool(st.session_state.binance_api_key)
+
+    st.markdown(f"""
+    <div style='font-size:0.78em; line-height:2'>
+    <span class='status-dot {"dot-green" if gemini_ok else "dot-red"}'></span>
+    Gemini AI: {'Connected' if gemini_ok else 'Not configured'}<br>
+    <span class='status-dot {"dot-green" if sheets_ok else "dot-yellow"}'></span>
+    Google Sheets: {'Connected' if sheets_ok else 'Not configured'}<br>
+    <span class='status-dot {"dot-green" if binance_ok else "dot-yellow"}'></span>
+    Binance: {'Key set' if binance_ok else 'Demo mode'}
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("**🪙 Coins**")
+    coins = st.multiselect("Active", st.session_state.coins,
+                           default=st.session_state.coins[:4], label_visibility="collapsed")
+    new_c = st.text_input("Add coin", placeholder="BNBUSDT").upper()
+    if st.button("➕ Add") and new_c and new_c not in st.session_state.coins:
+        st.session_state.coins.append(new_c); st.rerun()
+
+    st.markdown("---")
+    tf = st.select_slider("⏱ Timeframe", ["1m","5m","15m","1h","4h","1d"],
+                          value=st.session_state.timeframe)
+    st.session_state.timeframe = tf
+
+    st.markdown("---")
+    st.toggle("🤖 Auto Trading", key="auto_trading")
+    st.toggle("🧠 AI Signals",   key="ai_signals")
+    st.toggle("📰 News Filter",  key="news_filter")
+    if st.session_state.auto_trading:
+        st.error("⚠️ Auto trading ON")
+
+    st.markdown("---")
+    if st.button("🔄 Refresh Data"):
+        st.session_state.signals_cache = {}; st.rerun()
+
+
+# ─────────────────────────────────────────
+# HEADER
+# ─────────────────────────────────────────
+
+col_h1, col_h2 = st.columns([4,1])
+with col_h1:
+    st.markdown("<h1 style='margin:0;font-size:1.8em;letter-spacing:3px'>📡 CRYPTOAI TERMINAL</h1>",
+                unsafe_allow_html=True)
+with col_h2:
+    st.markdown(f"<div style='text-align:right;color:#4a5568;font-size:0.75em;padding-top:8px'>"
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M')}</div>", unsafe_allow_html=True)
 st.markdown("---")
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown('<div style="color:#00FFA3;font-family:monospace;font-weight:bold;letter-spacing:2px;">⚙️ SETTINGS</div>', unsafe_allow_html=True)
-    st.markdown("---")
-    selected_coins = st.multiselect("Select Coins", POPULAR_COINS,
-                                    default=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"])
-    primary_coin = st.selectbox("Primary Coin", selected_coins if selected_coins else ["BTCUSDT"])
-    timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=2,
-                             format_func=lambda x: f"{x} — {TIMEFRAMES[x]}")
-    st.markdown("---")
-    show_smc = st.toggle("Show SMC Zones", value=True)
-    candle_limit = st.slider("Candles", 100, 500, 200)
-    st.markdown("---")
-    capital  = st.number_input("Capital ($)", value=1000.0, step=100.0)
-    risk_pct = st.slider("Risk per Trade (%)", 0.5, 10.0, 1.0, 0.5)
-    st.markdown(f'<div style="text-align:center;margin-top:4px;">{get_risk_label(risk_pct)}</div>', unsafe_allow_html=True)
-    st.markdown("---")
 
-    # ── API Status in Sidebar ────────────────────────────────────────────────
-    st.markdown('<div style="color:#64748B;font-size:0.75rem;letter-spacing:2px;">API STATUS</div>', unsafe_allow_html=True)
-    if st.button("🔌 Check APIs", use_container_width=True):
-        with st.spinner("Testing..."):
-            statuses = get_api_status()
-        for name, status in statuses.items():
-            st.markdown(f'<div style="font-family:monospace;font-size:0.8rem;padding:2px 0;">{status} {name}</div>', unsafe_allow_html=True)
+# ─────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────
 
-    st.markdown("---")
-    auto_refresh = st.toggle("Auto Refresh (30s)", value=False)
-
-if auto_refresh:
-    time.sleep(30)
-    st.rerun()
-
-# ── Tabs ─────────────────────────────────────────────────────────────────────
-tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs([
-    "📊 DASHBOARD","📈 CHART","🤖 AI SIGNALS",
-    "📰 NEWS","⚗️ BACKTEST","💰 RISK",
-    "📋 TRADES","⚙️ SETUP"
+(tab_dash, tab_chart, tab_signals, tab_ai,
+ tab_backtest, tab_sheets, tab_settings) = st.tabs([
+    "📊 Dashboard", "📈 Chart", "🎯 Signals",
+    "🤖 AI Chat", "📉 Backtest", "📋 Sheets", "⚙️ Settings"
 ])
 
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 1: DASHBOARD
-# ════════════════════════════════════════════════════════════════════════════
-with tab1:
-    if not selected_coins:
-        st.warning("Sidebar එකෙන් coin select කරන්න.")
+
+# ══════════════════════════════════════════
+# TAB 1 — DASHBOARD
+# ══════════════════════════════════════════
+
+with tab_dash:
+    if not coins:
+        st.warning("Select coins in the sidebar.")
     else:
-        # ── API Debug Panel ──────────────────────────────────────────────────
-        test_data = get_live_price(selected_coins[0])
-        src = test_data.get("source","FAILED")
-        src_color = "#00FFA3" if src not in ["FAILED","None","?"] else "#FF4466"
+        # Fetch and cache signals
+        prog = st.progress(0, "Analyzing markets...")
+        for i, sym in enumerate(coins):
+            prog.progress((i+1)/len(coins), f"Analyzing {sym}...")
+            key = f"{sym}_{tf}"
+            if key not in st.session_state.signals_cache:
+                df  = generate_ohlcv(sym, tf, 300)
+                df  = add_indicators(df)
+                sig = generate_signal(sym, df, tf)
+                ch24 = ((df["close"].iloc[-1]-df["close"].iloc[-min(96,len(df)-1)])/
+                        df["close"].iloc[-min(96,len(df)-1)]*100)
+                st.session_state.signals_cache[key] = {
+                    "sig": sig, "df": df, "ch24": round(ch24,2)
+                }
+        prog.empty()
 
-        if src == "FAILED":
-            st.error("⚠️ All APIs failed! Checking details...")
-            with st.expander("🔍 API Debug Info", expanded=True):
-                errors = test_data.get("errors", [])
-                for e in errors:
-                    st.code(e)
-                st.info("Sidebar → 'Check APIs' click කරලා which APIs work කියලා බලන්න.")
-        else:
-            st.markdown(f'<div style="color:{src_color};font-family:monospace;font-size:0.75rem;margin-bottom:8px;">📡 Data Source: <b>{src}</b> ✅</div>', unsafe_allow_html=True)
+        cached = {s: st.session_state.signals_cache[f"{s}_{tf}"] for s in coins
+                  if f"{s}_{tf}" in st.session_state.signals_cache}
 
-        cols = st.columns(min(len(selected_coins),4))
-        price_data = {}
-        for i, coin in enumerate(selected_coins):
-            data = get_live_price(coin)
-            price_data[coin] = data
-            change = data.get("change_pct",0)
-            color = "#00FFA3" if change >= 0 else "#FF4466"
-            arrow = "▲" if change >= 0 else "▼"
-            price = data.get("price",0)
-            with cols[i % 4]:
+        # ── Market table ─────────────────────
+        rows = []
+        for sym, c in cached.items():
+            s = c["sig"]
+            ch = c["ch24"]
+            rows.append({
+                "Symbol": sym,
+                "Price":  f"${s['price']:,.4f}",
+                "24h":    f"{ch:+.2f}%",
+                "Signal": s["signal"],
+                "Conf":   f"{s['confidence']}%",
+                "SL":     f"${s['stop_loss']:,.4f}",
+                "TP":     f"${s['take_profit']:,.4f}",
+                "R:R":    f"1:{s['risk_reward']:.1f}",
+            })
+        df_tbl = pd.DataFrame(rows)
+
+        def _color_sig(v):
+            return ("color:#00ff88;font-weight:700" if v=="BUY" else
+                    "color:#ff3355;font-weight:700" if v=="SELL" else "color:#ffbb00")
+        def _color_ch(v):
+            return "color:#00ff88" if float(v.replace("%","").replace("+",""))>=0 else "color:#ff3355"
+
+        st.dataframe(
+            df_tbl.style.applymap(_color_sig, subset=["Signal"])
+                        .applymap(_color_ch, subset=["24h"]),
+            use_container_width=True, height=220
+        )
+
+        # ── Summary metrics ───────────────────
+        buy_n  = sum(1 for c in cached.values() if c["sig"]["signal"]=="BUY")
+        sell_n = sum(1 for c in cached.values() if c["sig"]["signal"]=="SELL")
+        hold_n = sum(1 for c in cached.values() if c["sig"]["signal"]=="HOLD")
+        avg_c  = np.mean([c["sig"]["confidence"] for c in cached.values()])
+        m1,m2,m3,m4 = st.columns(4)
+        m1.metric("🟢 BUY",  buy_n)
+        m2.metric("🔴 SELL", sell_n)
+        m3.metric("🟡 HOLD", hold_n)
+        m4.metric("📊 Avg Conf", f"{avg_c:.1f}%")
+
+        # ── Signal cards ──────────────────────
+        st.markdown("---")
+        cols = st.columns(min(len(coins), 4))
+        for i, (sym, c) in enumerate(cached.items()):
+            s = c["sig"]
+            css = {"BUY":"sig-buy","SELL":"sig-sell","HOLD":"sig-hold"}[s["signal"]]
+            clr = {"BUY":"#00ff88","SELL":"#ff3355","HOLD":"#ffbb00"}[s["signal"]]
+            emj = {"BUY":"▲","SELL":"▼","HOLD":"━"}[s["signal"]]
+            with cols[i%4]:
                 st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">{coin.replace('USDT','')}</div>
-                    <div class="metric-value">${price:,.2f}</div>
-                    <div style="color:{color};font-size:0.9rem;font-family:monospace;">{arrow} {change:+.2f}%</div>
-                    <div style="color:#64748B;font-size:0.7rem;margin-top:4px;">Vol: {data.get('volume',0):,.0f}</div>
+                <div class='card {css}'>
+                  <div style='font-size:0.75em;color:#4a5568'>{sym}</div>
+                  <div style='font-size:1.6em;color:{clr};font-weight:700'>{emj} {s['signal']}</div>
+                  <div style='font-size:0.85em;color:{clr}'>{s['confidence']}% confidence</div>
+                  <div style='font-size:0.78em;color:#6b7280;margin-top:6px'>
+                    Price: ${s['price']:,.4f}<br>
+                    SL: ${s['stop_loss']:,.4f}<br>
+                    TP: ${s['take_profit']:,.4f}
+                  </div>
                 </div>""", unsafe_allow_html=True)
 
-        st.markdown("---")
-        rows = []
-        for coin, d in price_data.items():
-            rows.append({"Coin":coin.replace("USDT",""),"Price ($)":f"{d.get('price',0):,.4f}",
-                "24h Change":f"{d.get('change_pct',0):+.2f}%","24h High":f"{d.get('high',0):,.4f}",
-                "24h Low":f"{d.get('low',0):,.4f}","Volume":f"{d.get('volume',0):,.0f}",
-                "Source":d.get("source","?")})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 2: CHART
-# ════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.markdown(f'<div style="color:#00FFA3;font-family:monospace;letter-spacing:2px;">{primary_coin} · {timeframe}</div>', unsafe_allow_html=True)
-    with st.spinner("Chart data loading..."):
-        df = get_klines(primary_coin, timeframe, limit=candle_limit)
+# ══════════════════════════════════════════
+# TAB 2 — CHART
+# ══════════════════════════════════════════
 
-    if df.empty:
-        st.error("⚠️ Chart data load වෙන්නේ නැහැ. API status check කරන්න.")
+with tab_chart:
+    if not coins:
+        st.warning("Select coins in sidebar.")
     else:
-        df_ind = run_all_indicators(df.copy())
-        structure = detect_structure(df_ind)
-        waves = detect_elliott_wave(df_ind)
-        rsi_val = df_ind["rsi"].iloc[-1] if "rsi" in df_ind.columns else 0
-        price_now = df["close"].iloc[-1]
+        c1,c2,c3 = st.columns([2,2,1])
+        chart_sym = c1.selectbox("Coin", coins, key="chart_sym")
+        chart_tf  = c2.select_slider("Timeframe", ["1m","5m","15m","1h","4h","1d"],
+                                     value=tf, key="chart_tf2")
+        n_candles = c3.select_slider("Candles", [100,200,300,500], value=200)
 
-        cs1,cs2,cs3,cs4 = st.columns(4)
-        cs1.markdown(f'<div class="metric-card"><div class="metric-label">STRUCTURE</div><div style="font-size:0.9rem;color:#E2E8F0;font-family:monospace;margin-top:4px;">{structure["structure"]}</div></div>', unsafe_allow_html=True)
-        cs2.markdown(f'<div class="metric-card"><div class="metric-label">ELLIOTT</div><div style="font-size:0.85rem;color:#FFD700;font-family:monospace;margin-top:4px;">{waves["wave_label"]}</div></div>', unsafe_allow_html=True)
-        rsi_c = "#FF4466" if rsi_val>70 else "#00FFA3" if rsi_val<30 else "#E2E8F0"
-        cs3.markdown(f'<div class="metric-card"><div class="metric-label">RSI</div><div style="font-size:1.4rem;color:{rsi_c};font-family:monospace;">{rsi_val:.1f}</div></div>', unsafe_allow_html=True)
-        cs4.markdown(f'<div class="metric-card"><div class="metric-label">PRICE</div><div class="metric-value">${price_now:,.2f}</div></div>', unsafe_allow_html=True)
+        with st.spinner("Loading chart..."):
+            df_c = generate_ohlcv(chart_sym, chart_tf, n_candles)
+            df_c = add_indicators(df_c)
 
-        fig = create_candlestick_chart(df_ind, f"{primary_coin}/{timeframe}", show_smc=show_smc)
+        fig = make_subplots(rows=3,cols=1,row_heights=[0.6,0.2,0.2],
+                            shared_xaxes=True,vertical_spacing=0.03,
+                            subplot_titles=[f"{chart_sym} ({chart_tf})", "RSI", "Volume"])
+
+        # Candles
+        fig.add_trace(go.Candlestick(x=df_c.index,open=df_c["open"],high=df_c["high"],
+            low=df_c["low"],close=df_c["close"],name="Price",
+            increasing_line_color="#00ff88",decreasing_line_color="#ff3355"), row=1,col=1)
+
+        # EMAs
+        for ema,col in [(9,"#ffbb00"),(21,"#00aaff"),(50,"#ff44aa")]:
+            fig.add_trace(go.Scatter(x=df_c.index,y=df_c[f"ema{ema}"],
+                name=f"EMA{ema}",line=dict(color=col,width=1.2)), row=1,col=1)
+
+        # BB
+        fig.add_trace(go.Scatter(x=df_c.index,y=df_c["bb_up"],name="BB+",
+            line=dict(color="#334466",dash="dot")), row=1,col=1)
+        fig.add_trace(go.Scatter(x=df_c.index,y=df_c["bb_lo"],name="BB-",
+            line=dict(color="#334466",dash="dot"),fill="tonexty",
+            fillcolor="rgba(100,150,255,0.04)"), row=1,col=1)
+
+        # RSI
+        fig.add_trace(go.Scatter(x=df_c.index,y=df_c["rsi"],name="RSI",
+            line=dict(color="#ffbb00",width=1.5)), row=2,col=1)
+        fig.add_hline(y=70,line_color="#ff3355",line_dash="dash",row=2,col=1)
+        fig.add_hline(y=30,line_color="#00ff88",line_dash="dash",row=2,col=1)
+        fig.add_hline(y=50,line_color="#333",line_dash="dot",row=2,col=1)
+
+        # Volume
+        vclr = ["#00ff88" if c>=o else "#ff3355"
+                for c,o in zip(df_c["close"],df_c["open"])]
+        fig.add_trace(go.Bar(x=df_c.index,y=df_c["volume"],name="Vol",
+            marker_color=vclr,opacity=0.7), row=3,col=1)
+        fig.add_trace(go.Scatter(x=df_c.index,y=df_c["vol_ma"],name="Vol MA",
+            line=dict(color="#ffbb00",width=1)), row=3,col=1)
+
+        fig.update_layout(height=700,paper_bgcolor="#060910",plot_bgcolor="#0c1117",
+            font=dict(color="#c9d1d9",family="JetBrains Mono"),
+            legend=dict(bgcolor="#0c1117",bordercolor="#1e2d3d",orientation="h",y=1.02),
+            xaxis_rangeslider_visible=False,margin=dict(l=8,r=8,t=35,b=8))
+        for ax in ["xaxis","xaxis2","xaxis3","yaxis","yaxis2","yaxis3"]:
+            fig.update_layout(**{ax: dict(gridcolor="#1e2d3d",showgrid=True)})
+
         st.plotly_chart(fig, use_container_width=True)
 
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 3: AI SIGNALS + EMAIL ALERT + TRADE CAPTURE
-# ════════════════════════════════════════════════════════════════════════════
-with tab3:
-    col_train, col_sig = st.columns([1,2])
 
-    with col_train:
-        st.markdown("**🔥 Train Models**")
-        train_coins = st.multiselect("Coins", POPULAR_COINS,
-                                     default=selected_coins[:2] if selected_coins else ["BTCUSDT"])
-        train_tf = st.selectbox("Train TF", ["1h","4h","1d"])
-        if st.button("Train", use_container_width=True):
-            for coin in train_coins:
-                with st.spinner(f"Training {coin}..."):
-                    df_t = get_klines(coin, train_tf, limit=500)
-                    if not df_t.empty:
-                        r = train_model(df_t, coin)
-                        if "error" in r: st.error(f"{coin}: {r['error']}")
-                        else: st.success(f"✅ {coin} — {r['accuracy']}%")
-                    else: st.warning(f"⚠️ {coin}: No data")
+# ══════════════════════════════════════════
+# TAB 3 — SIGNALS
+# ══════════════════════════════════════════
 
-    with col_sig:
-        st.markdown("**📡 Live Signals**")
-        send_email_on_signal = st.toggle("📧 Email alert on signal", value=False)
-        save_signal_as_trade = st.toggle("💾 Save to Supabase", value=False)
+with tab_signals:
+    if not coins:
+        st.warning("Select coins in sidebar.")
+    else:
+        sig_sym = st.selectbox("Analyze", coins, key="sig_sym")
+        with st.spinner(f"Generating signal for {sig_sym}..."):
+            df_s = generate_ohlcv(sig_sym, tf, 300)
+            df_s = add_indicators(df_s)
+            sig  = generate_signal(sig_sym, df_s, tf)
 
-        if st.button("🔍 Generate Signals", use_container_width=True):
-            for coin in (selected_coins if selected_coins else ["BTCUSDT"]):
-                df_s = get_klines(coin, timeframe, limit=300)
-                if df_s.empty: continue
-                sig   = predict_signal(df_s, coin)
-                price = get_live_price(coin)
-                px    = price.get("price",0)
-                signal_text = sig.get("signal","N/A")
-                conf  = sig.get("confidence",0)
-                color = "#00FFA3" if "BUY" in signal_text else "#FF4466" if "SELL" in signal_text else "#64748B"
+        s   = sig
+        clr = {"BUY":"#00ff88","SELL":"#ff3355","HOLD":"#ffbb00"}[s["signal"]]
+        emj = {"BUY":"▲ BUY","SELL":"▼ SELL","HOLD":"━ HOLD"}[s["signal"]]
 
+        st.markdown(f"""
+        <div style='background:#0c1117;border:2px solid {clr}44;border-radius:16px;
+                    padding:28px;text-align:center;margin:12px 0'>
+          <div style='font-size:0.9em;color:#4a5568;letter-spacing:3px'>{s['symbol']} · {s['timeframe']}</div>
+          <div style='font-size:3em;color:{clr};font-weight:800;font-family:Syne'>{emj}</div>
+          <div style='font-size:1em;color:{clr}'>{s['confidence']}% confidence</div>
+          <div style='font-size:0.75em;color:#4a5568;margin-top:4px'>{s['timestamp']}</div>
+        </div>""", unsafe_allow_html=True)
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Entry",  f"${s['price']:,.4f}")
+        c2.metric("Stop Loss",   f"${s['stop_loss']:,.4f}",
+                  delta=f"{(s['stop_loss']-s['price'])/s['price']*100:+.2f}%")
+        c3.metric("Take Profit", f"${s['take_profit']:,.4f}",
+                  delta=f"{(s['take_profit']-s['price'])/s['price']*100:+.2f}%")
+        c4.metric("R:R", f"1 : {s['risk_reward']:.1f}")
+
+        st.markdown("---")
+        col1,col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 📋 Signal Reasons")
+            for r in s["reason"]:
+                ic = "✅" if s["signal"]=="BUY" else "⚠️" if s["signal"]=="SELL" else "ℹ️"
+                st.markdown(f"{ic} {r}")
+
+        with col2:
+            # Confidence gauge
+            fig_g = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=s["confidence"],
+                gauge={"axis":{"range":[0,100]},"bar":{"color":clr},
+                       "bgcolor":"#0c1117","bordercolor":"#1e2d3d",
+                       "steps":[{"range":[0,40],"color":"#1a0d0d"},
+                                 {"range":[40,65],"color":"#1a1a0d"},
+                                 {"range":[65,100],"color":"#0d1a0d"}]},
+                number={"suffix":"%","font":{"color":clr,"size":36}},
+                title={"text":"Confidence","font":{"color":"#4a5568"}},
+            ))
+            fig_g.update_layout(height=260,paper_bgcolor="#060910",
+                font=dict(color="#c9d1d9"),margin=dict(l=20,r=20,t=40,b=10))
+            st.plotly_chart(fig_g, use_container_width=True)
+
+        # Log to Sheets
+        sid = st.session_state.spreadsheet_id
+        if sid and SHEETS_AVAILABLE:
+            if st.button("📋 Log signal to Google Sheets"):
+                ok = log_signal_to_sheet(sid, s)
+                if ok: st.success("Signal logged ✓")
+                else:  st.error("Failed to log signal")
+
+
+# ══════════════════════════════════════════
+# TAB 4 — AI CHAT
+# ══════════════════════════════════════════
+
+with tab_ai:
+    st.markdown("### 🤖 Gemini AI Trading Analyst")
+
+    status = get_genai_install_status()
+    if not status["installed"]:
+        st.error("❌ `google-generativeai` not installed. Add to requirements.txt and redeploy.")
+        st.code("google-generativeai>=0.5.0", language="text")
+    elif not status["configured"]:
+        st.warning("⚠️ Gemini API key not configured. Go to **⚙️ Settings** tab.")
+    else:
+        rotator = get_gemini_rotator()
+        st.success(f"✅ Connected | Key: {rotator.current_key_masked} | "
+                   f"Model: {st.session_state.gemini_model}")
+
+        # Quick analysis buttons
+        st.markdown("**Quick Analysis:**")
+        qcols = st.columns(4)
+        quick_prompts = {
+            "📊 Market Overview": f"Give a brief crypto market overview for {', '.join(coins[:4])} right now.",
+            "📈 BTC Analysis":    "Analyze BTC price action and key levels to watch this week.",
+            "⚠️ Risk Check":     "What are the biggest risks for crypto traders right now?",
+            "💡 Trade Idea":      f"Suggest one high-quality trade setup for {coins[0] if coins else 'BTC'}.",
+        }
+        for i,(label,prompt) in enumerate(quick_prompts.items()):
+            with qcols[i]:
+                if st.button(label):
+                    st.session_state.chat_history.append({"role":"user","content":prompt})
+
+        st.markdown("---")
+
+        # Chat display
+        chat_container = st.container()
+        with chat_container:
+            for msg in st.session_state.chat_history[-10:]:
+                role = msg["role"]
+                icon = "👤" if role=="user" else "🤖"
+                bg   = "#111827" if role=="user" else "#0d1f0d"
+                bc   = "#1e2d3d" if role=="user" else "#00ff8833"
                 st.markdown(f"""
-                <div class="metric-card" style="margin-bottom:8px;text-align:left;
-                     display:flex;justify-content:space-between;align-items:center;">
-                  <div>
-                    <div style="color:#E2E8F0;font-family:monospace;">{coin.replace('USDT','/USDT')}</div>
-                    <div style="color:#64748B;font-size:0.75rem;">${px:,.4f} · {price.get('source','?')}</div>
+                <div style='background:{bg};border:1px solid {bc};border-radius:10px;
+                            padding:12px 16px;margin:6px 0;font-size:0.88em'>
+                  <span style='color:#4a5568'>{icon} {'You' if role=='user' else 'Gemini AI'}</span><br>
+                  <span style='color:#c9d1d9'>{msg['content']}</span>
+                </div>""", unsafe_allow_html=True)
+
+            # Process pending user message
+            last = st.session_state.chat_history[-1] if st.session_state.chat_history else None
+            if last and last["role"] == "user" and (
+                len(st.session_state.chat_history) < 2 or
+                st.session_state.chat_history[-2]["role"] != "user"
+            ):
+                with st.spinner("Gemini thinking..."):
+                    system = ("You are a professional cryptocurrency trading analyst. "
+                              "Be concise, data-driven, and always mention risk management.")
+                    response = quick_chat(last["content"], system)
+                    st.session_state.chat_history.append({"role":"assistant","content":response})
+                st.rerun()
+
+        # Input
+        user_input = st.chat_input("Ask Gemini about crypto markets...")
+        if user_input:
+            st.session_state.chat_history.append({"role":"user","content":user_input})
+            st.rerun()
+
+        if st.button("🗑 Clear Chat"):
+            st.session_state.chat_history = []; st.rerun()
+
+        # Key usage stats
+        if rotator := get_gemini_rotator():
+            with st.expander("🔑 API Key Usage"):
+                stats = rotator.get_usage_stats()
+                for s_info in stats:
+                    active = "◉ ACTIVE" if s_info["active"] else "○"
+                    st.markdown(f"`{active}` Key #{s_info['index']}: {s_info['key']} | "
+                                f"Calls: {s_info['calls']} | Errors: {s_info['errors']}")
+
+
+# ══════════════════════════════════════════
+# TAB 5 — BACKTEST
+# ══════════════════════════════════════════
+
+with tab_backtest:
+    st.markdown("### 📉 Backtesting Engine")
+    c1,c2,c3 = st.columns(3)
+    bt_sym  = c1.selectbox("Coin", coins or ["BTCUSDT"], key="bt_sym")
+    bt_tf   = c2.select_slider("TF", ["15m","1h","4h","1d"], value="1h", key="bt_tf")
+    bt_bal  = c3.number_input("Balance ($)", 100.0, 100000.0, 1000.0, key="bt_bal")
+    bt_risk = st.slider("Risk per trade (%)", 0.5, 5.0, 1.0, 0.5, key="bt_risk")
+    bt_conf = st.slider("Min confidence (%)", 50, 85, 65, key="bt_conf")
+
+    if st.button("▶️ Run Backtest", type="primary"):
+        with st.spinner("Running backtest..."):
+            df_bt = generate_ohlcv(bt_sym, bt_tf, 500)
+            df_bt = add_indicators(df_bt)
+
+            balance = bt_bal
+            equity  = [bt_bal]
+            trades  = []
+
+            for i in range(60, len(df_bt)-1, 4):
+                window = df_bt.iloc[max(0,i-200):i+1]
+                sig    = generate_signal(bt_sym, window, bt_tf)
+                if sig["signal"]=="HOLD" or sig["confidence"]<bt_conf: continue
+
+                entry = float(df_bt["close"].iloc[i])
+                sl    = sig["stop_loss"]
+                tp    = sig["take_profit"]
+                risk_amt = balance*(bt_risk/100)
+                pr   = abs(entry-sl)
+                if pr<=0: continue
+                size = min(risk_amt/pr*entry, balance*0.2)
+
+                # Simulate outcome
+                future = df_bt.iloc[i+1:i+20]
+                won = False
+                for _,fc in future.iterrows():
+                    if sig["signal"]=="BUY":
+                        if fc["low"]<=sl:  break
+                        if fc["high"]>=tp: won=True; break
+                    else:
+                        if fc["high"]>=sl: break
+                        if fc["low"]<=tp:  won=True; break
+
+                pnl = size*(abs(tp-entry)/entry) if won else -size*(abs(sl-entry)/entry)
+                balance += pnl
+                equity.append(round(balance,2))
+                trades.append({"dir":sig["signal"],"won":won,"pnl":round(pnl,2)})
+
+            if trades:
+                wins  = [t for t in trades if t["won"]]
+                loses = [t for t in trades if not t["won"]]
+                wr    = len(wins)/len(trades)*100
+                pnl   = balance-bt_bal
+                gp    = sum(t["pnl"] for t in wins)
+                gl    = abs(sum(t["pnl"] for t in loses))
+                pf    = gp/gl if gl>0 else float("inf")
+
+                # Drawdown
+                peak  = bt_bal; max_dd = 0
+                for b in equity:
+                    peak = max(peak,b)
+                    max_dd = max(max_dd, (peak-b)/peak*100)
+
+                pnl_c = "#00ff88" if pnl>=0 else "#ff3355"
+                st.markdown(f"""
+                <div style='background:#0c1117;border:2px solid {pnl_c}44;border-radius:14px;
+                            padding:20px;text-align:center'>
+                  <div style='font-size:2em;color:{pnl_c};font-weight:700'>
+                    ${pnl:+,.2f} ({pnl/bt_bal*100:+.1f}%)
                   </div>
-                  <div style="text-align:right;">
-                    <div style="color:{color};font-family:monospace;font-size:1.1rem;font-weight:bold;">{signal_text}</div>
-                    <div style="color:#64748B;font-size:0.75rem;">Confidence: {conf}%</div>
+                  <div style='color:#4a5568;font-size:0.85em'>
+                    {bt_sym} · {bt_tf} · {len(trades)} trades
                   </div>
                 </div>""", unsafe_allow_html=True)
 
-                if sig.get("trained") and px > 0:
-                    # Email alert
-                    if send_email_on_signal and ("BUY" in signal_text or "SELL" in signal_text):
-                        ok, msg = send_alert_email(coin, signal_text, px, conf)
-                        st.caption(f"📧 {msg}")
+                m1,m2,m3,m4,m5 = st.columns(5)
+                m1.metric("Win Rate",  f"{wr:.1f}%")
+                m2.metric("Profit Factor", f"{pf:.2f}")
+                m3.metric("Max DD",    f"{max_dd:.1f}%")
+                m4.metric("Avg Win",   f"${np.mean([t['pnl'] for t in wins]):.2f}" if wins else "$0")
+                m5.metric("Avg Loss",  f"${abs(np.mean([t['pnl'] for t in loses])):.2f}" if loses else "$0")
 
-                    # Save trade to Supabase
-                    if save_signal_as_trade and ("BUY" in signal_text or "SELL" in signal_text):
-                        df_atr = run_all_indicators(df_s.copy())
-                        atr = df_atr["atr"].iloc[-1] if "atr" in df_atr.columns else px*0.01
-                        direction = "long" if "BUY" in signal_text else "short"
-                        sltp = calculate_sl_tp(px, direction, atr)
-                        result = save_trade(coin, signal_text, px, conf,
-                                           sltp["stop_loss"], sltp["take_profit"])
-                        if "error" not in str(result):
-                            st.caption(f"💾 Trade saved to Supabase")
-                        else:
-                            st.caption(f"⚠️ Supabase: {result}")
-
-    # ── Gemini AI ─────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("**🤖 Gemini AI Analysis**")
-    gemini = get_gemini_rotator()
-    if st.button("💬 Get AI Analysis", use_container_width=True):
-        with st.spinner("Consulting Gemini AI..."):
-            df_ai = get_klines(primary_coin, timeframe, limit=100)
-            if not df_ai.empty:
-                df_ai = run_all_indicators(df_ai)
-                structure = detect_structure(df_ai)
-                rsi_raw = df_ai["rsi"].iloc[-1] if "rsi" in df_ai.columns else None
-                rsi_now = f"{rsi_raw:.1f}" if rsi_raw is not None else "N/A"
-                px = df_ai["close"].iloc[-1]
-                prompt = f"""Analyze {primary_coin} {timeframe}:
-Price: ${px:,.4f}, RSI: {rsi_now}
-Structure: {structure['structure']}, High: ${structure['last_high']:,.4f}, Low: ${structure['last_low']:,.4f}
-Give: 1) Sentiment 2) Key levels 3) BUY/SELL/WAIT recommendation 4) Risk warning. Under 250 words."""
-                response = gemini.generate(prompt)
-                st.markdown(f'<div style="background:#111827;border:1px solid #1E2A3A;border-radius:8px;padding:16px;font-size:0.9rem;line-height:1.7;color:#CBD5E1;">{response.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 4: NEWS
-# ════════════════════════════════════════════════════════════════════════════
-with tab4:
-    cn1,cn2 = st.columns([3,1])
-    with cn2: news_filter = st.selectbox("Coin filter", ["All"]+selected_coins)
-    if st.button("📰 Fetch News"):
-        with st.spinner("Fetching..."):
-            articles = fetch_news(None if news_filter=="All" else news_filter, 20)
-            sentiment = get_overall_market_sentiment(articles)
-        st.markdown(f'Market Sentiment: **{sentiment}**')
-        for art in articles:
-            sc = "#00FFA3" if "Bullish" in art["sentiment"] else "#FF4466" if "Bearish" in art["sentiment"] else "#64748B"
-            st.markdown(f"""<div class="price-card" style="margin-bottom:6px;">
-                <div style="display:flex;justify-content:space-between;">
-                  <a href="{art['link']}" target="_blank" style="color:#E2E8F0;text-decoration:none;font-size:0.9rem;flex:1;margin-right:12px;">{art['title']}</a>
-                  <span style="color:{sc};font-size:0.8rem;white-space:nowrap;font-family:monospace;">{art['sentiment']}</span>
-                </div>
-                <div style="color:#64748B;font-size:0.7rem;margin-top:4px;">{art['source']}</div>
-            </div>""", unsafe_allow_html=True)
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 5: BACKTEST
-# ════════════════════════════════════════════════════════════════════════════
-with tab5:
-    bc1,bc2 = st.columns([1,2])
-    with bc1:
-        bt_coin    = st.selectbox("Coin", POPULAR_COINS)
-        bt_tf      = st.selectbox("TF", list(TIMEFRAMES.keys()), index=2)
-        bt_capital = st.number_input("Capital ($)", value=1000.0, step=100.0)
-        bt_limit   = st.slider("Candles", 200, 1000, 500)
-    with bc2:
-        if st.button("▶️ Run Backtest", use_container_width=True):
-            with st.spinner("Running..."):
-                df_bt = get_klines(bt_coin, bt_tf, limit=bt_limit)
-                if df_bt.empty:
-                    st.error("No data")
-                else:
-                    if not predict_signal(df_bt, bt_coin).get("trained"):
-                        train_model(df_bt, bt_coin)
-                    result = run_backtest(df_bt, bt_coin, bt_capital)
-                    if "error" in result:
-                        st.error(result["error"])
-                    else:
-                        rc = "#00FFA3" if result["total_return_pct"]>=0 else "#FF4466"
-                        r1,r2,r3,r4 = st.columns(4)
-                        r1.markdown(f'<div class="metric-card"><div class="metric-label">FINAL</div><div class="metric-value">${result["final_capital"]:,.2f}</div></div>', unsafe_allow_html=True)
-                        r2.markdown(f'<div class="metric-card"><div class="metric-label">RETURN</div><div style="font-size:1.4rem;color:{rc};font-family:monospace;">{result["total_return_pct"]:+.2f}%</div></div>', unsafe_allow_html=True)
-                        r3.markdown(f'<div class="metric-card"><div class="metric-label">TRADES</div><div class="metric-value">{result["total_trades"]}</div></div>', unsafe_allow_html=True)
-                        r4.markdown(f'<div class="metric-card"><div class="metric-label">WIN RATE</div><div class="metric-value">{result["win_rate"]}%</div></div>', unsafe_allow_html=True)
-                        st.plotly_chart(create_equity_curve(result["equity_curve"], result["trades"]), use_container_width=True)
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 6: RISK
-# ════════════════════════════════════════════════════════════════════════════
-with tab6:
-    rr1,rr2 = st.columns(2)
-    with rr1:
-        st.markdown("**Position Size Calculator**")
-        entry_p = st.number_input("Entry ($)", value=50000.0, step=100.0)
-        sl_p    = st.number_input("Stop Loss ($)", value=49000.0, step=100.0)
-        direction = st.radio("Direction", ["long","short"], horizontal=True)
-        if st.button("Calculate", use_container_width=True):
-            pos  = calculate_position_size(capital, risk_pct, entry_p, sl_p)
-            atr  = abs(entry_p - sl_p)
-            sltp = calculate_sl_tp(entry_p, direction, atr)
-            if "error" not in pos:
-                st.markdown(f"""<div class="metric-card" style="text-align:left;margin-top:12px;">
-                <div style="font-family:monospace;line-height:2;font-size:0.9rem;">
-                💰 Risk: <span style="color:#FFD700;">${pos['risk_amount']}</span><br>
-                📊 Units: <span style="color:#00FFA3;">{pos['units']}</span><br>
-                🛑 SL: <span style="color:#FF4466;">${sltp['stop_loss']:,.4f}</span><br>
-                🎯 TP: <span style="color:#00FFA3;">${sltp['take_profit']:,.4f}</span><br>
-                ⚖️ R:R: <span style="color:#FFD700;">1:{sltp['rr_ratio']}</span>
-                </div></div>""", unsafe_allow_html=True)
-    with rr2:
-        st.markdown("**Auto Compounding**")
-        cr   = st.slider("Monthly Return (%)", 1.0, 50.0, 10.0, 0.5)
-        cm   = st.slider("Months", 3, 60, 24)
-        cc   = st.number_input("Start Capital ($)", value=capital, step=100.0)
-        if st.button("📈 Calculate", use_container_width=True):
-            curve = auto_compound(cc, cr, cm)
-            final = curve[-1]["capital"]
-            st.markdown(f"""<div class="metric-card" style="text-align:left;margin-top:12px;">
-            <div style="font-family:monospace;line-height:2;">
-            🚀 Final: <span style="color:#00FFA3;">${final:,.2f}</span><br>
-            ✖️ Multiplier: <span style="color:#4488FF;">{final/cc:.2f}x</span>
-            </div></div>""", unsafe_allow_html=True)
-            st.plotly_chart(create_compound_chart(curve), use_container_width=True)
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 7: TRADES (Supabase)
-# ════════════════════════════════════════════════════════════════════════════
-with tab7:
-    st.markdown('<div style="color:#64748B;font-size:0.75rem;letter-spacing:3px;margin-bottom:12px;">TRADE TRACKER · SUPABASE</div>', unsafe_allow_html=True)
-
-    # Stats
-    stats = get_trade_stats()
-    ts1,ts2,ts3,ts4,ts5 = st.columns(5)
-    ts1.markdown(f'<div class="metric-card"><div class="metric-label">TOTAL</div><div class="metric-value">{stats["total"]}</div></div>', unsafe_allow_html=True)
-    ts2.markdown(f'<div class="metric-card"><div class="metric-label">OPEN</div><div style="font-size:1.4rem;color:#FFD700;font-family:monospace;">{stats["open"]}</div></div>', unsafe_allow_html=True)
-    ts3.markdown(f'<div class="metric-card"><div class="metric-label">WIN RATE</div><div class="metric-value">{stats["win_rate"]}%</div></div>', unsafe_allow_html=True)
-    ts4.markdown(f'<div class="metric-card"><div class="metric-label">AVG P&L</div><div style="font-size:1.4rem;color:{"#00FFA3" if stats["avg_pnl"]>=0 else "#FF4466"};font-family:monospace;">{stats["avg_pnl"]:+.2f}%</div></div>', unsafe_allow_html=True)
-    ts5.markdown(f'<div class="metric-card"><div class="metric-label">TOTAL P&L</div><div style="font-size:1.4rem;color:{"#00FFA3" if stats["total_pnl"]>=0 else "#FF4466"};font-family:monospace;">{stats["total_pnl"]:+.2f}%</div></div>', unsafe_allow_html=True)
-
-    st.markdown("---")
-    col_tl, col_tc = st.columns([2,1])
-
-    with col_tl:
-        st.markdown("**Open Trades**")
-        open_trades = get_trades(status="OPEN", limit=20)
-        if open_trades:
-            for t in open_trades:
-                sig_color = "#00FFA3" if "BUY" in str(t.get("signal","")) else "#FF4466"
-                st.markdown(f"""<div class="price-card" style="margin-bottom:6px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                  <div>
-                    <span style="color:#E2E8F0;font-family:monospace;">{t.get('symbol','?')}</span>
-                    <span style="color:{sig_color};margin-left:8px;font-size:0.85rem;">{t.get('signal','?')}</span>
-                  </div>
-                  <div style="text-align:right;font-size:0.8rem;">
-                    <div style="color:#E2E8F0;">Entry: ${t.get('entry_price',0):,.4f}</div>
-                    <div style="color:#64748B;">Conf: {t.get('confidence',0)}%</div>
-                  </div>
-                </div></div>""", unsafe_allow_html=True)
-        else:
-            st.info("Open trades නැහැ. AI Signals tab → Generate Signals → 'Save to Supabase' enable කරන්න.")
-
-    with col_tc:
-        st.markdown("**Close Trade**")
-        trade_id   = st.number_input("Trade ID", min_value=1, step=1)
-        exit_price = st.number_input("Exit Price ($)", value=0.0, step=1.0)
-        exit_reason = st.selectbox("Reason", ["TP Hit","SL Hit","Manual","Signal"])
-        if st.button("✅ Close Trade", use_container_width=True):
-            result = close_trade(int(trade_id), exit_price, exit_reason)
-            if "error" not in str(result):
-                pnl = result[0].get("pnl_pct",0) if isinstance(result, list) else 0
-                win = result[0].get("result","?") if isinstance(result, list) else "?"
-                badge = '<span class="win-badge">WIN</span>' if win=="WIN" else '<span class="loss-badge">LOSS</span>'
-                st.markdown(f"Trade closed! {badge} P&L: **{pnl:+.2f}%**", unsafe_allow_html=True)
+                # Equity curve
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(y=equity,mode="lines",name="Equity",
+                    fill="tozeroy",fillcolor=f"{pnl_c}11",
+                    line=dict(color=pnl_c,width=2)))
+                fig_eq.add_hline(y=bt_bal,line_dash="dash",line_color="#4a5568")
+                fig_eq.update_layout(height=280,paper_bgcolor="#060910",plot_bgcolor="#0c1117",
+                    font=dict(color="#c9d1d9"),margin=dict(l=8,r=8,t=30,b=8),
+                    title="Equity Curve",yaxis=dict(gridcolor="#1e2d3d"),
+                    xaxis=dict(gridcolor="#1e2d3d"))
+                st.plotly_chart(fig_eq, use_container_width=True)
             else:
-                st.error(f"Error: {result}")
-
-    st.markdown("---")
-    st.markdown("**Trade History**")
-    all_trades = get_trades(limit=50)
-    if all_trades:
-        df_trades = pd.DataFrame(all_trades)
-        show_cols = [c for c in ["id","symbol","signal","entry_price","exit_price",
-                                   "pnl_pct","result","status","created_at"] if c in df_trades.columns]
-        st.dataframe(df_trades[show_cols], use_container_width=True, hide_index=True)
+                st.info("No trades triggered with current settings. Lower min confidence.")
     else:
-        st.info("Trade history නැහැ.")
+        st.info("Configure settings and click **▶️ Run Backtest**")
 
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 8: SETUP
-# ════════════════════════════════════════════════════════════════════════════
-with tab8:
-    st.markdown("### ⚙️ Setup Guide")
 
-    with st.expander("📊 Google Sheets Setup", expanded=True):
-        st.markdown(SETUP_GUIDE, unsafe_allow_html=False)
-        if is_configured():
-            st.success("✅ Google Sheets connected!")
-            if st.button("🔄 Refresh Stats Sheet"):
-                update_stats_sheet()
-                st.success("Stats sheet updated!")
-        else:
-            st.warning("⚠️ Google Sheets not configured yet. Add secrets above.")
+# ══════════════════════════════════════════
+# TAB 6 — GOOGLE SHEETS
+# ══════════════════════════════════════════
 
-    with st.expander("📧 Email Setup (Gmail)"):
-        st.markdown("""
-**Gmail App Password හදාගන්නේ:**
+with tab_sheets:
+    st.markdown("### 📋 Google Sheets Integration")
 
-1. [myaccount.google.com](https://myaccount.google.com) → Security
-2. 2-Step Verification → ON කරන්න
-3. Search "App passwords" → Mail → Generate
-4. 16-digit password copy කරන්න → secrets.toml එකට `app_password` හැටියට දාන්න
-        """)
-        if st.button("📧 Send Test Email"):
-            with st.spinner("Sending..."):
-                ok, msg = send_test_email()
-            if ok: st.success(msg)
-            else:  st.error(msg)
+    sheets_status = get_sheets_status()
+    if not sheets_status["library_installed"]:
+        st.error("❌ `gspread` not installed. Add to requirements.txt: `gspread>=6.0.0`")
+    elif not sheets_status["authenticated"]:
+        st.warning("⚠️ Google Sheets not authenticated. Configure credentials in **⚙️ Settings**.")
+    else:
+        st.success("✅ Google Sheets connected")
 
-    with st.expander("🤖 Gemini API Debug", expanded=True):
-        st.markdown("**Secrets එකේ keys check කරනවා:**")
+    st.markdown("---")
 
-        # Show what keys are loaded
-        try:
-            gem_secrets = st.secrets.get("gemini", {})
-            if gem_secrets:
-                loaded = []
-                for i in range(1, 8):
-                    k = gem_secrets.get(f"key_{i}", "")
-                    if k:
-                        masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "TOO SHORT"
-                        loaded.append(f"key_{i}: `{masked}`")
-                    else:
-                        loaded.append(f"key_{i}: ❌ missing")
-                for line in loaded:
-                    st.markdown(line)
-            else:
-                st.error("❌ [gemini] section secrets எகில் නෑ!")
-                st.code("""Streamlit Secrets → add:
-[gemini]
-key_1 = "AIzaSy..."
-key_2 = "AIzaSy..."
-""")
-        except Exception as e:
-            st.error(f"Secrets read error: {e}")
+    # Spreadsheet ID input
+    sid = st.text_input(
+        "Google Spreadsheet ID",
+        value=st.session_state.spreadsheet_id,
+        placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+        help="Copy from your Google Sheet URL: docs.google.com/spreadsheets/d/**[ID]**/edit"
+    )
+    if sid != st.session_state.spreadsheet_id:
+        st.session_state.spreadsheet_id = sid
+
+    if not SHEETS_AVAILABLE:
+        st.info("Install gspread to enable Google Sheets features.")
+    elif not sid:
+        st.info("Enter your Spreadsheet ID above to get started.")
+    else:
+        st.markdown("#### 📤 Export to Sheets")
+        c1,c2,c3 = st.columns(3)
+
+        with c1:
+            if st.button("💾 Save Settings"):
+                settings = {
+                    "risk_percent":   st.session_state.risk_pct,
+                    "timeframe":      st.session_state.timeframe,
+                    "coins":          ",".join(st.session_state.coins),
+                    "auto_trading":   st.session_state.auto_trading,
+                    "ai_signals":     st.session_state.ai_signals,
+                    "gemini_model":   st.session_state.gemini_model,
+                }
+                ok = save_settings_to_sheet(sid, settings)
+                st.success("Settings saved ✓") if ok else st.error("Failed")
+
+        with c2:
+            if st.button("🔑 Save API Keys"):
+                keys_data = {
+                    "binance_api_key":    st.session_state.binance_api_key,
+                    "binance_api_secret": st.session_state.binance_api_secret,
+                    "gemini_keys":        st.session_state.gemini_api_keys,
+                    "telegram_token":     st.session_state.telegram_token,
+                    "telegram_chat_id":   st.session_state.telegram_chat_id,
+                }
+                ok = save_api_keys_to_sheet(sid, keys_data)
+                st.success("API keys saved ✓") if ok else st.error("Failed")
+
+        with c3:
+            if st.button("📥 Load from Sheets"):
+                loaded = load_api_keys_from_sheet(sid)
+                if loaded:
+                    for k,v in loaded.items():
+                        if k in st.session_state: st.session_state[k] = v
+                    st.success(f"Loaded {len(loaded)} settings ✓")
+                else:
+                    st.warning("Nothing to load")
 
         st.markdown("---")
-        test_key = st.text_input("Manual key test (paste key here):", type="password",
-                                  placeholder="AIzaSy...")
-        if st.button("🧪 Test This Key"):
-            if test_key:
-                try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=test_key)
-                    model = genai.GenerativeModel("gemini-3-flash-preview")
-                    r = model.generate_content("Say OK")
-                    st.success(f"✅ Key works! Response: {r.text[:50]}")
-                except Exception as e:
-                    st.error(f"❌ Key failed: {e}")
+        st.markdown("#### 📊 Trade History from Sheets")
+        if st.button("📥 Load Trade History"):
+            df_hist = get_trade_history(sid)
+            if not df_hist.empty:
+                st.dataframe(df_hist, use_container_width=True, height=300)
             else:
-                st.warning("Key paste කරන්න")
+                st.info("No trades logged yet.")
+
+    # Setup guide
+    with st.expander("📖 Google Sheets Setup Guide"):
+        st.markdown("""
+**Step 1 — Create Service Account:**
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create project → Enable **Google Sheets API** + **Google Drive API**
+3. Create **Service Account** → Download JSON key
+
+**Step 2 — Share your Sheet:**
+1. Open your Google Sheet
+2. Share with the service account email (ends with `@...gserviceaccount.com`)
+3. Give **Editor** permission
+
+**Step 3 — Add credentials:**
+- **Streamlit Cloud**: Add JSON content to Secrets as `gcp_service_account`
+- **Local**: Place `service_account.json` in project root
+
+**Step 4 — Get Spreadsheet ID:**
+From URL: `docs.google.com/spreadsheets/d/`**`[ID_HERE]`**`/edit`
+        """)
 
 
-        if st.button("Test All APIs Now"):
-            with st.spinner("Testing all APIs..."):
-                statuses = get_api_status()
-            for name, status in statuses.items():
-                st.markdown(f"**{name}:** {status}")
-            st.info("Binance block වෙලා නම් CoinGecko/CryptoCompare auto-fallback වෙනවා. Data still works!")
+# ══════════════════════════════════════════
+# TAB 7 — SETTINGS
+# ══════════════════════════════════════════
 
-st.markdown("---")
-st.markdown('<div style="text-align:center;color:#1E2A3A;font-family:monospace;font-size:0.7rem;">CryptoAI Terminal · Educational purposes only · Not financial advice</div>', unsafe_allow_html=True)
+with tab_settings:
+    st.markdown("### ⚙️ Settings & API Configuration")
+
+    # ── Section 1: Gemini AI ─────────────────
+    st.markdown("#### 🤖 Gemini AI Configuration")
+
+    gemini_status = get_genai_install_status()
+    if not gemini_status["installed"]:
+        st.error("""
+        ❌ `google-generativeai` not installed!
+
+        Add this to `requirements.txt`:
+        ```
+        google-generativeai>=0.5.0
+        ```
+        Then redeploy your Streamlit app.
+        """)
+    else:
+        st.success(f"✅ google-generativeai installed | Keys configured: {gemini_status['key_count']}")
+
+    with st.expander("🔑 Add Gemini API Keys", expanded=not gemini_status["configured"]):
+        st.markdown("""
+        Get free API keys at [aistudio.google.com](https://aistudio.google.com/app/apikey)
+
+        Add multiple keys for automatic rotation when quota is exceeded.
+        """)
+        gemini_keys_text = st.text_area(
+            "Gemini API Keys (one per line)",
+            value="\n".join(st.session_state.gemini_api_keys),
+            placeholder="AIza...\nAIza...\nAIza...",
+            height=120,
+            help="Add multiple keys — system auto-rotates when quota exceeded"
+        )
+        gemini_model = st.selectbox(
+            "Model",
+            ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
+            index=["gemini-1.5-flash","gemini-1.5-pro","gemini-2.0-flash-exp"].index(
+                st.session_state.gemini_model
+            ) if st.session_state.gemini_model in ["gemini-1.5-flash","gemini-1.5-pro","gemini-2.0-flash-exp"] else 0
+        )
+
+        if st.button("💾 Save & Connect Gemini", type="primary"):
+            keys = [k.strip() for k in gemini_keys_text.split("\n") if k.strip()]
+            if not keys:
+                st.error("Enter at least one API key")
+            elif not GENAI_AVAILABLE:
+                st.error("Install google-generativeai first")
+            else:
+                try:
+                    rotator = initialize_rotator_from_keys(keys, gemini_model)
+                    # Quick test
+                    test = rotator.generate("Say 'OK' in one word.")
+                    if "error" not in test.lower() and len(test) < 50:
+                        st.success(f"✅ Connected! {len(keys)} key(s) | Test: {test.strip()}")
+                    else:
+                        st.success(f"✅ {len(keys)} key(s) saved")
+                except Exception as e:
+                    st.error(f"Connection failed: {e}")
+
+    st.markdown("---")
+
+    # ── Section 2: Binance ───────────────────
+    st.markdown("#### 🔶 Binance API")
+    col1,col2 = st.columns(2)
+    with col1:
+        b_key = st.text_input("API Key", value=st.session_state.binance_api_key,
+                              type="password", key="b_key_input")
+    with col2:
+        b_sec = st.text_input("Secret Key", value=st.session_state.binance_api_secret,
+                              type="password", key="b_sec_input")
+    b_testnet = st.checkbox("Use Testnet (Paper Trading)", value=True)
+
+    if st.button("💾 Save Binance Keys"):
+        st.session_state.binance_api_key    = b_key
+        st.session_state.binance_api_secret = b_sec
+        st.success("Binance keys saved ✓")
+
+    st.markdown("---")
+
+    # ── Section 3: Telegram / Email ──────────
+    st.markdown("#### 📬 Alerts")
+    col1,col2 = st.columns(2)
+    with col1:
+        t_tok = st.text_input("Telegram Bot Token", value=st.session_state.telegram_token,
+                              type="password")
+        t_cid = st.text_input("Telegram Chat ID",   value=st.session_state.telegram_chat_id)
+    with col2:
+        e_sender = st.text_input("Gmail Sender", placeholder="you@gmail.com")
+        e_pass   = st.text_input("App Password", type="password")
+
+    if st.button("💾 Save Alert Settings"):
+        st.session_state.telegram_token   = t_tok
+        st.session_state.telegram_chat_id = t_cid
+        st.success("Alert settings saved ✓")
+
+    st.markdown("---")
+
+    # ── Section 4: Google Sheets Credentials ─
+    st.markdown("#### 📋 Google Sheets Credentials")
+    cred_json = st.text_area(
+        "Service Account JSON",
+        placeholder='{"type":"service_account","project_id":"...","private_key":"..."}',
+        height=120,
+        help="Paste your downloaded service_account.json content here"
+    )
+    if st.button("💾 Save GCP Credentials"):
+        if cred_json.strip():
+            try:
+                import json
+                st.session_state.gcp_credentials = json.loads(cred_json)
+                st.success("✅ Credentials saved")
+            except Exception:
+                st.error("Invalid JSON. Paste the entire service_account.json content.")
+
+    st.markdown("---")
+
+    # ── Section 5: Trading Parameters ────────
+    st.markdown("#### 📊 Trading Parameters")
+    col1,col2,col3 = st.columns(3)
+    with col1:
+        rp = st.number_input("Risk per trade (%)", 0.5, 10.0,
+                             st.session_state.risk_pct, 0.5, key="risk_input")
+        st.session_state.risk_pct = rp
+    with col2:
+        st.number_input("Risk:Reward ratio", 1.0, 5.0, 2.0, 0.5)
+    with col3:
+        st.number_input("Max daily loss (%)", 1.0, 20.0, 5.0, 1.0)
+
+    st.markdown("---")
+
+    # ── Section 6: Streamlit secrets template ─
+    with st.expander("📋 Streamlit Cloud Secrets Template"):
+        st.code("""
+# Add this in Streamlit Cloud → Settings → Secrets
+
+GEMINI_API_KEYS = "AIza...key1,AIza...key2"
+GEMINI_API_KEY  = "AIza...key1"
+
+BINANCE_API_KEY    = "your_binance_key"
+BINANCE_API_SECRET = "your_binance_secret"
+
+TELEGRAM_BOT_TOKEN = "your_bot_token"
+TELEGRAM_CHAT_ID   = "your_chat_id"
+
+SPREADSHEET_ID = "your_google_sheet_id"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project"
+private_key_id = "key-id"
+private_key = "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----\\n"
+client_email = "name@project.iam.gserviceaccount.com"
+client_id = "123456789"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+        """, language="toml")
+
+    st.markdown("""
+    > **⚠️ Disclaimer:** For educational purposes only.
+    > Cryptocurrency trading involves significant risk. Never risk money you can't afford to lose.
+    """)

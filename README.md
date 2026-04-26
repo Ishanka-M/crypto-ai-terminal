@@ -1,176 +1,122 @@
-# 📊 CryptoAI Trader
+# 📡 CryptoAI Terminal
 
-A modular, production-ready cryptocurrency trading analysis system with AI signals, Smart Money Concepts, and a live dashboard.
+Full-featured cryptocurrency trading analysis system with Gemini AI, Google Sheets integration, and auto trading signals.
+
+## 🚀 Streamlit Cloud Deploy (5 minutes)
+
+### Step 1 — Fork & Clone
+```bash
+git clone https://github.com/yourusername/crypto-ai-terminal.git
+cd crypto-ai-terminal
+```
+
+### Step 2 — Deploy to Streamlit Cloud
+1. Go to [share.streamlit.io](https://share.streamlit.io)
+2. Connect GitHub repo
+3. Set **Main file**: `app.py`
+4. Click **Deploy**
+
+### Step 3 — Add Secrets
+In Streamlit Cloud → **App Settings** → **Secrets**, paste:
+
+```toml
+GEMINI_API_KEYS = "AIzaSy...key1,AIzaSy...key2"
+
+BINANCE_API_KEY    = "your_key"
+BINANCE_API_SECRET = "your_secret"
+
+SPREADSHEET_ID = "your_sheet_id"
+
+[gcp_service_account]
+type         = "service_account"
+project_id   = "your-project"
+private_key  = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+client_email = "name@project.iam.gserviceaccount.com"
+# ... rest of service account JSON
+```
 
 ---
 
-## 🏗️ Project Structure
+## 🔑 Getting API Keys
+
+### Gemini AI (Free)
+1. Go to [aistudio.google.com](https://aistudio.google.com/app/apikey)
+2. Click **Create API key**
+3. Add multiple keys for rotation
+
+### Google Sheets
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create project → Enable **Sheets API** + **Drive API**
+3. Create **Service Account** → Download JSON
+4. Share your Google Sheet with the service account email
+
+### Binance
+1. Go to Binance → Account → API Management
+2. Create API key (Read-only for data, Enable Trading for auto-trade)
+3. Enable testnet for paper trading
+
+---
+
+## 📁 Project Structure
 
 ```
-crypto_trading/
-├── config/
-│   ├── settings.py       ← All configuration (API keys, thresholds)
-│   └── logger.py         ← Centralized logging
-├── data/
-│   └── fetcher.py        ← Binance API + Demo data generator
-├── strategy/
-│   ├── indicators.py     ← RSI, EMA, MACD, Bollinger Bands
-│   ├── smc.py            ← Smart Money Concepts (OB, FVG, BOS, CHOCH)
-│   └── signal_engine.py  ← BUY/SELL/HOLD signal generator
-├── ui/
-│   └── dashboard.py      ← Streamlit web dashboard
-├── models/               ← ML models (Phase 5)
-├── backtest/             ← Backtesting engine (Phase 4)
-├── logs/                 ← Auto-generated log files
-├── .env.example          ← API key template
-├── requirements.txt
-├── main.py               ← CLI entry point
+crypto-ai-terminal/
+├── app.py                    ← Main Streamlit app
+├── requirements.txt          ← All dependencies
+├── utils/
+│   ├── gemini_rotator.py     ← Gemini AI + key rotation
+│   └── sheets_manager.py     ← Google Sheets CRUD
+├── .streamlit/
+│   ├── config.toml           ← Theme + server config
+│   └── secrets.toml          ← Local secrets (never commit!)
 └── README.md
 ```
 
 ---
 
-## ⚡ Quick Start (5 minutes)
+## 📊 Features
 
-### Step 1: Clone / Download
+| Tab | Features |
+|-----|---------|
+| 📊 Dashboard | Live prices, signal cards, 24h change |
+| 📈 Chart | Candlestick + EMA + BB + RSI + Volume |
+| 🎯 Signals | BUY/SELL/HOLD + SL/TP + confidence gauge |
+| 🤖 AI Chat | Gemini AI analyst + quick prompts |
+| 📉 Backtest | Equity curve + win rate + metrics |
+| 📋 Sheets | Save/load keys + settings + trade log |
+| ⚙️ Settings | All API keys + Gemini keys + GCP creds |
 
-```bash
-git clone https://github.com/yourusername/cryptoai-trader.git
-cd cryptoai-trader
-```
+---
 
-### Step 2: Create Virtual Environment
+## 🛠 Local Development
 
 ```bash
 python -m venv venv
-
-# Windows:
-venv\Scripts\activate
-
-# Mac/Linux:
-source venv/bin/activate
-```
-
-### Step 3: Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Step 4: Configure Environment
-
-```bash
-# Copy the template
-cp .env.example .env
-
-# Edit .env with your settings (optional for demo mode)
-# DEMO_MODE=True means no API key needed!
-```
-
-### Step 5: Run
-
-**Option A: CLI Signal Scan (no browser needed)**
-```bash
-python main.py
-```
-
-**Option B: Full Web Dashboard**
-```bash
-streamlit run ui/dashboard.py
-```
-
-Then open: http://localhost:8501
-
----
-
-## 🔑 API Keys Setup (Optional)
-
-The system works in **Demo Mode** without any API keys.
-
-To use **real Binance data**:
-
-1. Go to [Binance API Management](https://www.binance.com/en/my/settings/api-management)
-2. Create a new API key (enable "Read" permissions only for data)
-3. Add to your `.env` file:
-
-```env
-BINANCE_API_KEY=your_key_here
-BINANCE_API_SECRET=your_secret_here
-BINANCE_TESTNET=True    # Keep True for safety
-DEMO_MODE=False         # Switch to live data
-```
-
----
-
-## 📦 Build Phases
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| ✅ Phase 1 | Complete | Data fetching, Indicators, SMC, Signal Engine, Dashboard |
-| 🔄 Phase 2 | Next | Elliott Wave Detection, Multi-timeframe analysis |
-| 📋 Phase 3 | Planned | News filter, Telegram/Email alerts |
-| 📋 Phase 4 | Planned | Backtesting engine with metrics |
-| 📋 Phase 5 | Planned | ML model (LSTM/XGBoost) + auto-training |
-| 📋 Phase 6 | Planned | Auto trading execution + risk management |
-
----
-
-## 🧠 How Signals Work
-
-Signals combine two scoring systems:
-
-**Technical Indicators (50% weight)**
-- RSI: Oversold = BUY, Overbought = SELL
-- EMA Stack: Bullish alignment = BUY
-- MACD: Crossovers
-- Bollinger Bands: Price at extremes
-- Volume: Spike confirms signal direction
-
-**Smart Money Concepts (50% weight)**
-- BOS/CHOCH: Trend direction and reversals
-- Order Blocks: Institutional demand/supply zones
-- Fair Value Gaps: Price imbalance areas
-- Liquidity Zones: For SL/TP placement
-
-**Final Output:**
-- BUY/SELL: when score difference ≥ 20 points
-- HOLD: ambiguous market
-- Confidence: 50% base + score difference
-
----
-
-## 🚀 Deployment
-
-### Streamlit Cloud (Free)
-1. Push to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Connect repo → select `ui/dashboard.py`
-4. Add API keys as Secrets
-
-### VPS (Ubuntu)
-```bash
-# Install dependencies
-sudo apt update && sudo apt install python3-pip -y
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Run with screen (keeps running after logout)
-screen -S trader
-streamlit run ui/dashboard.py --server.port 8501
+# Create local secrets
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# Edit secrets.toml with your keys
 
-# Press Ctrl+A, D to detach
+streamlit run app.py
 ```
 
 ---
 
-## ⚠️ Disclaimer
+## ⚠️ Fix: ModuleNotFoundError for google.generativeai
 
-This software is for **educational and research purposes only**.  
-Cryptocurrency trading involves significant financial risk.  
-Never trade with money you cannot afford to lose.  
-Past signal performance does not guarantee future results.
+If you see this error on Streamlit Cloud:
+```
+ModuleNotFoundError: No module named 'google.generativeai'
+```
+
+**Solution:** Make sure `requirements.txt` contains:
+```
+google-generativeai>=0.5.0
+```
+Then go to **Manage App** → **Reboot app**.
 
 ---
 
-## 📝 License
-
-MIT License - Free to use and modify.
+> **Disclaimer:** Educational purposes only. Crypto trading involves significant risk.
